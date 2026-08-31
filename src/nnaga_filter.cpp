@@ -220,11 +220,11 @@ const NnagaScalePointV1 kTypePoints[] = {
 };
 const NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kTypePort, "Type", "type", "", NNAGA_PARAMETER_ENUM,
-     0.0f, 2, kTypePoints},
+     0.0f, 2, kTypePoints, 0},
     {sizeof(NnagaParameterV1), kFrequencyPort, "Frequency", "frequency", "Hz", 0,
-     log_to_normalized(1000.0f, kMinFrequency, kMaxFrequency), 0, nullptr},
+     log_to_normalized(1000.0f, kMinFrequency, kMaxFrequency), 0, nullptr, 0},
     {sizeof(NnagaParameterV1), kQPort, "Q", "q", "", 0,
-     log_to_normalized(0.70710678f, kMinQ, kMaxQ), 0, nullptr},
+     log_to_normalized(0.70710678f, kMinQ, kMaxQ), 0, nullptr, 0},
 };
 const NnagaPluginDescriptorV1 kDescriptor = {
     sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.filter", "NNAGA Filter", "NNAGA", "1.0.0",

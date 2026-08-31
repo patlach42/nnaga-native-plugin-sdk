@@ -1,4 +1,5 @@
 #include "nnaga/native_plugin.h"
+#include <algorithm>
 
 #include <cmath>
 #include <cstdio>
@@ -11,8 +12,10 @@ constexpr uint32_t kGridPort = 5;
 constexpr uint32_t kAmountPort = 6;
 constexpr uint32_t kSeedPort = 7;
 constexpr uint32_t kMixPort = 8;
-constexpr uint32_t kMaxSteps = 64;
+constexpr uint32_t kBarsPort = 9;
+constexpr uint32_t kMaxSteps = 128;
 constexpr uint32_t kCrossfadeFrames = 32;
+constexpr uint32_t kRingSeconds = 64;
 
 struct Shuffle {
     float* ring_left = nullptr;
@@ -20,6 +23,9 @@ struct Shuffle {
     uint32_t capacity = 0;
     uint32_t write = 0;
     uint64_t captured = 0;
+    uint64_t active_loop_frames = 0;
+    uint64_t expected_transport_frame = 0;
+    bool transport_valid = false;
     uint64_t previous_step = UINT64_MAX;
     uint64_t previous_loop_frames = 0;
     uint32_t steps = 0;
@@ -29,6 +35,7 @@ struct Shuffle {
     float grid = 0.5f;
     float amount = 1.0f;
     float seed = 0.0f;
+    float bars = 0.0f;
     float mix = 1.0f;
     float previous_left = 0.0f;
     float previous_right = 0.0f;
@@ -51,6 +58,32 @@ uint32_t next_random(Shuffle* shuffle) noexcept {
 
 uint32_t grid_division(float grid) noexcept {
     return grid < 0.25f ? 4u : (grid < 0.75f ? 8u : 16u);
+}
+
+uint32_t bars_count(float bars) noexcept {
+    return 1u + static_cast<uint32_t>(std::lround(clamp01(bars) * 7.0f));
+}
+
+bool frames_per_bar(const NnagaProcessContextV1* context, uint64_t* frames) noexcept {
+    if (!context || !std::isfinite(context->sample_rate) || !std::isfinite(context->beats_per_minute) ||
+        !std::isfinite(context->beats_per_bar) || context->sample_rate <= 0.0 ||
+        context->beats_per_minute <= 0.0 || context->beats_per_bar <= 0.0f || context->beat_unit <= 0)
+        return false;
+    const double value = context->sample_rate * 60.0 / context->beats_per_minute *
+        static_cast<double>(context->beats_per_bar) * 4.0 / static_cast<double>(context->beat_unit);
+    if (!std::isfinite(value) || value < 1.0 || value > static_cast<double>(UINT64_MAX)) return false;
+    *frames = static_cast<uint64_t>(std::llround(value));
+    return *frames != 0;
+}
+
+void reset_capture(Shuffle* shuffle) noexcept {
+    shuffle->write = 0;
+    shuffle->captured = 0;
+    shuffle->previous_step = UINT64_MAX;
+    shuffle->previous_loop_frames = 0;
+    shuffle->fade_remaining = 0;
+    shuffle->previous_left = 0.0f;
+    shuffle->previous_right = 0.0f;
 }
 
 void make_pattern(Shuffle* shuffle, uint32_t steps, uint64_t loop_frames) noexcept {
@@ -90,7 +123,7 @@ void destroy(NnagaPluginHandle handle) noexcept {
 int32_t activate(NnagaPluginHandle handle, double sample_rate, uint32_t) noexcept {
     Shuffle* shuffle = static_cast<Shuffle*>(handle);
     if (!shuffle || !std::isfinite(sample_rate) || sample_rate < 1000.0) return 0;
-    const uint32_t capacity = static_cast<uint32_t>(sample_rate * 16.0);
+    const uint32_t capacity = static_cast<uint32_t>(sample_rate * kRingSeconds);
     float* left = static_cast<float*>(std::calloc(capacity, sizeof(float)));
     float* right = static_cast<float*>(std::calloc(capacity, sizeof(float)));
     if (!left || !right) { std::free(left); std::free(right); return 0; }
@@ -100,11 +133,10 @@ int32_t activate(NnagaPluginHandle handle, double sample_rate, uint32_t) noexcep
     shuffle->ring_right = right;
     shuffle->capacity = capacity;
     shuffle->sample_rate = sample_rate;
-    shuffle->write = 0;
-    shuffle->captured = 0;
-    shuffle->previous_step = UINT64_MAX;
-    shuffle->previous_loop_frames = 0;
-    shuffle->fade_remaining = 0;
+    reset_capture(shuffle);
+    shuffle->active_loop_frames = 0;
+    shuffle->expected_transport_frame = 0;
+    shuffle->transport_valid = false;
     return 1;
 }
 
@@ -114,9 +146,10 @@ void reset(NnagaPluginHandle handle) noexcept {
     if (!shuffle || !shuffle->ring_left) return;
     std::memset(shuffle->ring_left, 0, shuffle->capacity * sizeof(float));
     std::memset(shuffle->ring_right, 0, shuffle->capacity * sizeof(float));
-    shuffle->write = 0;
-    shuffle->captured = 0;
-    shuffle->previous_step = UINT64_MAX;
+    reset_capture(shuffle);
+    shuffle->active_loop_frames = 0;
+    shuffle->expected_transport_frame = 0;
+    shuffle->transport_valid = false;
 }
 
 void set_parameter(NnagaPluginHandle handle, uint32_t port, float value) noexcept {
@@ -128,6 +161,7 @@ void set_parameter(NnagaPluginHandle handle, uint32_t port, float value) noexcep
         case kAmountPort: shuffle->amount = clamp01(value); break;
         case kSeedPort: shuffle->seed = clamp01(value); break;
         case kMixPort: shuffle->mix = clamp01(value); break;
+        case kBarsPort: shuffle->bars = clamp01(value); break;
         default: break;
     }
 }
@@ -137,6 +171,11 @@ uint32_t format_parameter(NnagaPluginHandle, uint32_t port, float value, char* o
     const char* text = "";
     if (port == kEnabledPort) text = clamp01(value) >= 0.5f ? "On" : "Off";
     if (port == kGridPort) text = clamp01(value) < 0.25f ? "1/4" : (clamp01(value) < 0.75f ? "1/8" : "1/16");
+    if (port == kBarsPort) {
+        const uint32_t bars = bars_count(value);
+        const int written = std::snprintf(output, capacity, "%u %s", bars, bars == 1 ? "bar" : "bars");
+        return written > 0 ? static_cast<uint32_t>(written) : 0;
+    }
     const int written = port == kAmountPort || port == kMixPort
         ? std::snprintf(output, capacity, "%.0f%%", clamp01(value) * 100.0f)
         : (port == kSeedPort ? std::snprintf(output, capacity, "%u", static_cast<uint32_t>(clamp01(value) * 65535.0f))
@@ -148,20 +187,35 @@ void process(NnagaPluginHandle handle, const float* in_l, const float* in_r, flo
              uint32_t frames, const NnagaProcessContextV1* context) noexcept {
     Shuffle* shuffle = static_cast<Shuffle*>(handle);
     if (!shuffle || !shuffle->ring_left || !in_l || !in_r || !out_l || !out_r || !context) return;
-    const uint64_t loop_frames = context->looping && context->loop_end_frame > 0
-        ? context->loop_end_frame : 0;
-    if (loop_frames == 0 || loop_frames > shuffle->capacity || shuffle->enabled < 0.5f) {
+    uint64_t bar_frames = 0;
+    const bool timing_valid = frames_per_bar(context, &bar_frames);
+    const uint32_t bars = bars_count(shuffle->bars);
+    const uint64_t loop_frames = timing_valid && bar_frames <= UINT64_MAX / bars ? bar_frames * bars : 0;
+    auto dry = [&] {
         for (uint32_t i = 0; i < frames; ++i) { out_l[i] = in_l[i]; out_r[i] = in_r[i]; }
+    };
+    const uint32_t steps = bars * grid_division(shuffle->grid);
+    if (!context->playing || loop_frames == 0 || loop_frames > shuffle->capacity ||
+        steps == 0 || steps > kMaxSteps || shuffle->enabled < 0.5f) {
+        reset_capture(shuffle);
+        shuffle->active_loop_frames = 0;
+        shuffle->transport_valid = false;
+        dry();
         return;
     }
-    const uint32_t division = grid_division(shuffle->grid);
-    const uint64_t slice_frames = loop_frames / division;
-    const uint32_t steps = static_cast<uint32_t>(loop_frames / slice_frames);
+    const bool discontinuity = !shuffle->transport_valid ||
+        shuffle->expected_transport_frame != context->transport_frame ||
+        shuffle->active_loop_frames != loop_frames;
+    if (discontinuity) {
+        reset_capture(shuffle);
+        shuffle->active_loop_frames = loop_frames;
+    }
     for (uint32_t i = 0; i < frames; ++i) {
         const uint64_t frame = (context->transport_frame + i) % loop_frames;
-        const uint64_t step = frame / slice_frames;
+        const uint32_t step = static_cast<uint32_t>((frame * steps) / loop_frames);
         if (loop_frames != shuffle->previous_loop_frames || step != shuffle->previous_step) {
-            if (shuffle->previous_step != UINT64_MAX) shuffle->fade_remaining = kCrossfadeFrames;
+            if (shuffle->previous_step != UINT64_MAX && shuffle->captured >= loop_frames)
+                shuffle->fade_remaining = kCrossfadeFrames;
             if (step == 0 || loop_frames != shuffle->previous_loop_frames) make_pattern(shuffle, steps, loop_frames);
             shuffle->previous_loop_frames = loop_frames;
             shuffle->previous_step = step;
@@ -170,8 +224,13 @@ void process(NnagaPluginHandle handle, const float* in_l, const float* in_r, flo
         shuffle->ring_right[shuffle->write] = in_r[i];
         float wet_l = in_l[i], wet_r = in_r[i];
         if (shuffle->captured >= loop_frames) {
-            const uint64_t source_frame = static_cast<uint64_t>(shuffle->permutation[step]) * slice_frames + frame % slice_frames;
-            const uint32_t read = static_cast<uint32_t>((shuffle->write + shuffle->capacity - loop_frames + source_frame) % shuffle->capacity);
+            const uint64_t source_start = (static_cast<uint64_t>(shuffle->permutation[step]) * loop_frames) / steps;
+            const uint64_t source_end = (static_cast<uint64_t>(shuffle->permutation[step] + 1) * loop_frames) / steps;
+            const uint64_t step_start = (static_cast<uint64_t>(step) * loop_frames) / steps;
+            const uint64_t source_frame = source_start +
+                std::min(frame - step_start, source_end - source_start - 1);
+            const uint32_t read = static_cast<uint32_t>(
+                (shuffle->write + shuffle->capacity - loop_frames + source_frame) % shuffle->capacity);
             wet_l = shuffle->ring_left[read];
             wet_r = shuffle->ring_right[read];
         }
@@ -188,18 +247,21 @@ void process(NnagaPluginHandle handle, const float* in_l, const float* in_r, flo
         shuffle->write = (shuffle->write + 1) % shuffle->capacity;
         ++shuffle->captured;
     }
+    shuffle->expected_transport_frame = context->transport_frame + frames;
+    shuffle->transport_valid = true;
 }
 
 constexpr NnagaScalePointV1 kOnOff[] = {{sizeof(NnagaScalePointV1), 0.0f, "Off"}, {sizeof(NnagaScalePointV1), 1.0f, "On"}};
 constexpr NnagaScalePointV1 kGrid[] = {{sizeof(NnagaScalePointV1), 0.0f, "1/4"}, {sizeof(NnagaScalePointV1), 0.5f, "1/8"}, {sizeof(NnagaScalePointV1), 1.0f, "1/16"}};
 constexpr NnagaParameterV1 kParameters[] = {
-    {sizeof(NnagaParameterV1), kEnabledPort, "Enabled", "enabled", "", NNAGA_PARAMETER_TOGGLE, 1.0f, 2, kOnOff},
-    {sizeof(NnagaParameterV1), kGridPort, "Grid", "grid", "", NNAGA_PARAMETER_ENUM, 0.5f, 3, kGrid},
-    {sizeof(NnagaParameterV1), kAmountPort, "Shuffle", "shuffle", "%", 0, 1.0f, 0, nullptr},
-    {sizeof(NnagaParameterV1), kSeedPort, "Seed", "seed", "", 0, 0.0f, 0, nullptr},
-    {sizeof(NnagaParameterV1), kMixPort, "Mix", "mix", "%", 0, 1.0f, 0, nullptr},
+    {sizeof(NnagaParameterV1), kEnabledPort, "Enabled", "enabled", "", NNAGA_PARAMETER_TOGGLE, 1.0f, 2, kOnOff, 0},
+    {sizeof(NnagaParameterV1), kGridPort, "Grid", "grid", "", NNAGA_PARAMETER_ENUM, 0.5f, 3, kGrid, 0},
+    {sizeof(NnagaParameterV1), kAmountPort, "Shuffle", "shuffle", "%", 0, 1.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV1), kSeedPort, "Seed", "seed", "", 0, 0.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV1), kMixPort, "Mix", "mix", "%", 0, 1.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV1), kBarsPort, "Bars", "bars", "", 0, 0.0f, 0, nullptr, 7},
 };
-constexpr NnagaPluginDescriptorV1 kDescriptor = {sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.0.0", 2, 2, 5, kParameters, create, destroy, activate, deactivate, reset, set_parameter, format_parameter, nullptr, process};
+constexpr NnagaPluginDescriptorV1 kDescriptor = {sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.0.2", 2, 2, 6, kParameters, create, destroy, activate, deactivate, reset, set_parameter, format_parameter, nullptr, process};
 const NnagaPluginDescriptorV1* get_plugin(uint32_t index) noexcept { return index == 0 ? &kDescriptor : nullptr; }
 constexpr NnagaPluginLibraryV1 kLibrary = {sizeof(NnagaPluginLibraryV1), NNAGA_NATIVE_ABI_VERSION, 1, get_plugin};
 } // namespace

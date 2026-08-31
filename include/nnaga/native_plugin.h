@@ -44,6 +44,7 @@ typedef struct NnagaParameterV1 {
     float default_normalized;
     uint32_t scale_point_count;
     const NnagaScalePointV1* scale_points;
+    uint32_t step_count;
 } NnagaParameterV1;
 
 typedef struct NnagaProcessContextV1 {
