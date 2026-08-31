@@ -229,8 +229,10 @@ void process(NnagaPluginHandle handle, const float* in_l, const float* in_r, flo
             const uint64_t step_start = (static_cast<uint64_t>(step) * loop_frames) / steps;
             const uint64_t source_frame = source_start +
                 std::min(frame - step_start, source_end - source_start - 1);
+            const uint64_t current_cycle_start =
+                (static_cast<uint64_t>(shuffle->write) + shuffle->capacity - frame) % shuffle->capacity;
             const uint32_t read = static_cast<uint32_t>(
-                (shuffle->write + shuffle->capacity - loop_frames + source_frame) % shuffle->capacity);
+                (current_cycle_start + shuffle->capacity - loop_frames + source_frame) % shuffle->capacity);
             wet_l = shuffle->ring_left[read];
             wet_r = shuffle->ring_right[read];
         }
