@@ -1,0 +1,13 @@
+{
+  "repository_id": "native.nnaga-shuffle",
+  "descriptor_id": "com.vibes.dsp.shuffle",
+  "name": "NNAGA Shuffle",
+  "version": "1.0.0",
+  "source": "https://github.com/patlach42/nnaga-native-plugin-sdk",
+  "manufacturer": "NNAGA",
+  "category": "Glitch",
+  "tags": ["Glitch", "Shuffle", "Stereo", "Native"],
+  "description": "Transport-synced stereo slice resequencer with deterministic random shuffle.",
+  "license": "MIT",
+  "library": "libnnaga_plugin_shuffle.so"
+}
