@@ -1,0 +1,13 @@
+{
+  "repository_id": "native.nnaga-filter",
+  "descriptor_id": "com.vibes.dsp.filter",
+  "name": "NNAGA Filter",
+  "version": "1.0.0",
+  "source": "https://github.com/patlach42/nnaga-native-plugin-sdk",
+  "manufacturer": "NNAGA",
+  "category": "Filter",
+  "tags": ["Filter", "Stereo", "Native"],
+  "description": "Stereo zero-latency low-pass or high-pass state-variable filter with resonant Q control.",
+  "license": "MIT",
+  "library": "libnnaga_plugin_filter.so"
+}

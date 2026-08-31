@@ -1,0 +1,21 @@
+name: build
+on:
+  push:
+  pull_request:
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake --preset host
+      - run: cmake --build --preset host --parallel
+      - run: ctest --test-dir build/host --output-on-failure
+  android-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+      - run: sdkmanager "ndk;26.1.10909125"
+      - run: cmake --preset android-arm64
+      - run: cmake --build --preset android-arm64 --parallel

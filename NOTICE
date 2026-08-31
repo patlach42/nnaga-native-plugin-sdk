@@ -1,0 +1,4 @@
+The NNAGA Filter uses the linear-trapezoidal state-variable filter equations
+published by Andy Simper (Cytomic) in the SvfLinearTrap technical papers.
+Cytomic states that the knowledge in those papers is placed in the public domain:
+https://cytomic.com/technical-papers/
