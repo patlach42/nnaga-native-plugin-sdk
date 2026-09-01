@@ -146,7 +146,7 @@ void assert_format(const NnagaPluginDescriptorV1* descriptor, NnagaPluginHandle 
 int main() {
     require(nnaga_plugin_entry(0) == nullptr, "unsupported ABI is rejected");
     const auto* descriptor = shuffle_descriptor();
-    require(std::strcmp(descriptor->version, "1.2.0") == 0, "current shuffle version");
+    require(std::strcmp(descriptor->version, "1.2.1") == 0, "current shuffle version");
     require(descriptor->parameter_count == 12, "current shuffle parameter count");
 
     const char* expected_names[] = {"Enabled", "Shuffle", "Seed", "Mix", "Bars",

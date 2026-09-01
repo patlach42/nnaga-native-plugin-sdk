@@ -146,8 +146,8 @@ uint32_t makeMotif(GridVariant variant, uint32_t baseUnits, uint32_t* lengths) n
 }
 
 bool appendMotif(Shuffle* shuffle, uint64_t loopFrames, uint32_t totalUnits,
-                 uint64_t destinationUnits, const uint32_t* lengths, uint32_t count,
-                 uint32_t groupUnits) noexcept {
+                 uint32_t gridUnits, uint64_t destinationUnits, const uint32_t* lengths,
+                 uint32_t count, uint32_t groupUnits) noexcept {
     if (shuffle->sliceCount + count > kMaxSlices) return false;
     const uint64_t destinationStart = destinationUnits * loopFrames / totalUnits;
     const uint64_t destinationEnd = (destinationUnits + groupUnits) * loopFrames / totalUnits;
@@ -156,8 +156,9 @@ bool appendMotif(Shuffle* shuffle, uint64_t loopFrames, uint32_t totalUnits,
     const bool randomize = shuffle->amount > 0.0f &&
         (shuffle->amount >= 1.0f ||
          nextRandom(shuffle->sourceRng) / static_cast<float>(UINT32_MAX) <= shuffle->amount);
+    const uint64_t gridFrames = std::max<uint64_t>(1, gridUnits * loopFrames / totalUnits);
     const uint64_t sourceStart = randomize && groupLength < loopFrames
-        ? nextRandom(shuffle->sourceRng) % (loopFrames - groupLength + 1)
+        ? gridFrames * (nextRandom(shuffle->sourceRng) % ((loopFrames - groupLength) / gridFrames + 1))
         : destinationStart;
     uint64_t offsetUnits = 0;
     for (uint32_t i = 0; i < count; ++i) {
@@ -234,7 +235,7 @@ void makeGrid(Shuffle* shuffle, uint64_t loopFrames, uint64_t cycleNumber) noexc
                 groupUnits = lengths[0];
             }
         }
-        if (!appendMotif(shuffle, loopFrames, totalUnits, cursor, lengths, count, groupUnits))
+        if (!appendMotif(shuffle, loopFrames, totalUnits, gridUnits, cursor, lengths, count, groupUnits))
             break;
         cursor += groupUnits;
     }
@@ -493,7 +494,7 @@ constexpr NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kGridSeedPort, "Grid seed", "grid_seed", "", 0, 0.0f, 0, nullptr, 0},
 };
 constexpr NnagaPluginDescriptorV1 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.2.0",
+    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.2.1",
     2, 2, 12, kParameters, create, destroy, activate, deactivate, reset, setParameter,
     formatParameter, nullptr, process,
 };
