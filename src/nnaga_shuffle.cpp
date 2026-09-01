@@ -263,7 +263,7 @@ constexpr NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kMixPort, "Mix", "mix", "%", 0, 1.0f, 0, nullptr, 0},
     {sizeof(NnagaParameterV1), kBarsPort, "Bars", "bars", "", 0, 0.0f, 0, nullptr, 7},
 };
-constexpr NnagaPluginDescriptorV1 kDescriptor = {sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.0.2", 2, 2, 6, kParameters, create, destroy, activate, deactivate, reset, set_parameter, format_parameter, nullptr, process};
+constexpr NnagaPluginDescriptorV1 kDescriptor = {sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.0.3", 2, 2, 6, kParameters, create, destroy, activate, deactivate, reset, set_parameter, format_parameter, nullptr, process};
 const NnagaPluginDescriptorV1* get_plugin(uint32_t index) noexcept { return index == 0 ? &kDescriptor : nullptr; }
 constexpr NnagaPluginLibraryV1 kLibrary = {sizeof(NnagaPluginLibraryV1), NNAGA_NATIVE_ABI_VERSION, 1, get_plugin};
 } // namespace
