@@ -66,10 +66,11 @@ struct Shuffle {
     float gridMode = 0.0f;
     float tripletMode = 0.0f;
     float gridSeed = 0.0f;
-    float previousLeft = 0.0f;
-    float previousRight = 0.0f;
     uint32_t fadeRemaining = 0;
     double sampleRate = 48000.0;
+    uint32_t maxFrames = 0;
+    float previousLeft = 0.0f;
+    float previousRight = 0.0f;
 };
 
 float clamp01(float value) noexcept {
@@ -93,18 +94,17 @@ uint32_t positionStep(const Shuffle* shuffle, float normalized) noexcept {
     return std::min(total, static_cast<uint32_t>(std::lround(clamp01(normalized) * total)));
 }
 
-bool framesPerBar(const NnagaProcessContextV1* context, uint64_t& frames) noexcept {
+bool framesPerBar(const NnagaProcessContextV2* context, uint64_t& frames) noexcept {
     if (!context || !std::isfinite(context->sample_rate) ||
         !std::isfinite(context->beats_per_minute) || !std::isfinite(context->beats_per_bar) ||
         context->sample_rate <= 0.0 || context->beats_per_minute <= 0.0 ||
         context->beats_per_bar <= 0.0f || context->beat_unit <= 0) return false;
     const double value = context->sample_rate * 60.0 / context->beats_per_minute *
         static_cast<double>(context->beats_per_bar) * 4.0 / static_cast<double>(context->beat_unit);
-    if (!std::isfinite(value) || value < 1.0 || value > static_cast<double>(UINT64_MAX)) return false;
+    if (!std::isfinite(value) || value < 1.0 || value > static_cast<double>(INT64_MAX)) return false;
     frames = static_cast<uint64_t>(std::llround(value));
     return frames != 0;
 }
-
 uint32_t gridIndex(float normalized) noexcept {
     return std::clamp(static_cast<uint32_t>(std::lround(clamp01(normalized) * (kGridChoices - 1))), 0u, kGridChoices - 1);
 }
@@ -287,10 +287,16 @@ void destroy(NnagaPluginHandle handle) noexcept {
     std::free(shuffle);
 }
 
-int32_t activate(NnagaPluginHandle handle, double sampleRate, uint32_t) noexcept {
+int32_t activate(NnagaPluginHandle handle, double sampleRate, uint32_t maxFrames) noexcept {
     auto* shuffle = static_cast<Shuffle*>(handle);
-    if (!shuffle || !std::isfinite(sampleRate) || sampleRate < 1000.0) return 0;
-    const uint32_t capacity = static_cast<uint32_t>(sampleRate * kRingSeconds);
+    if (!shuffle || !std::isfinite(sampleRate) || sampleRate < 1000.0 ||
+        maxFrames == 0 || maxFrames > NNAGA_NATIVE_MAX_FRAMES) return 0;
+    const double capacityValue = sampleRate * static_cast<double>(kRingSeconds);
+    if (!std::isfinite(capacityValue) || capacityValue < 1.0 ||
+        capacityValue > static_cast<double>(UINT32_MAX) ||
+        capacityValue > static_cast<double>(SIZE_MAX / sizeof(float))) return 0;
+    const uint32_t capacity = static_cast<uint32_t>(capacityValue);
+    if (capacity == 0) return 0;
     float* left = static_cast<float*>(std::calloc(capacity, sizeof(float)));
     float* right = static_cast<float*>(std::calloc(capacity, sizeof(float)));
     uint32_t* generation = static_cast<uint32_t*>(std::calloc(capacity, sizeof(uint32_t)));
@@ -306,6 +312,7 @@ int32_t activate(NnagaPluginHandle handle, double sampleRate, uint32_t) noexcept
     shuffle->ringGeneration = generation;
     shuffle->capacity = capacity;
     shuffle->sampleRate = sampleRate;
+    shuffle->maxFrames = maxFrames;
     resetCapture(shuffle);
     return 1;
 }
@@ -343,16 +350,14 @@ void setParameter(NnagaPluginHandle handle, uint32_t port, float value) noexcept
     }
 }
 
-void formatPosition(const Shuffle* shuffle, float value, char* output, uint32_t capacity) noexcept {
-    if (!shuffle || !output || !capacity) return;
-    const uint32_t sixteenth = positionStep(shuffle, value);
+void formatPosition(float value, char* output, uint32_t capacity) noexcept {
+    if (!output || !capacity) return;
+    const uint32_t sixteenth = static_cast<uint32_t>(std::lround(clamp01(value) * kSixteenthsPerBar));
     std::snprintf(output, capacity, "%u:%u:%u", sixteenth / 16 + 1, sixteenth % 16 / 4 + 1, sixteenth % 4 + 1);
 }
-
-uint32_t formatParameter(NnagaPluginHandle handle, uint32_t port, float value, char* output, uint32_t capacity) noexcept {
+uint32_t formatParameter(NnagaPluginHandle, uint32_t port, float value, char* output, uint32_t capacity) noexcept {
     if (!output || !capacity) return 0;
-    const auto* shuffle = static_cast<const Shuffle*>(handle);
-    if (port == kStartPort || port == kEndPort) formatPosition(shuffle, value, output, capacity);
+    if (port == kStartPort || port == kEndPort) formatPosition(value, output, capacity);
     else if (port == kGridPort || port == kFillFromPort || port == kFillToPort) {
         constexpr const char* labels[kGridChoices] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
         std::snprintf(output, capacity, "%s", labels[gridIndex(value)]);
@@ -381,10 +386,10 @@ uint32_t formatParameter(NnagaPluginHandle handle, uint32_t port, float value, c
 
 void process(NnagaPluginHandle handle, const float* inputLeft, const float* inputRight,
              float* outputLeft, float* outputRight, uint32_t frames,
-             const NnagaProcessContextV1* context) noexcept {
+             const NnagaProcessContextV2* context) noexcept {
     auto* shuffle = static_cast<Shuffle*>(handle);
     if (!shuffle || !shuffle->ringLeft || !shuffle->ringGeneration || !inputLeft || !inputRight ||
-        !outputLeft || !outputRight || !context) return;
+        !outputLeft || !outputRight || !context || frames == 0 || frames > shuffle->maxFrames) return;
     uint64_t barFrames = 0;
     const bool validTiming = framesPerBar(context, barFrames);
     const uint32_t bars = barCount(shuffle->bars);
@@ -464,55 +469,55 @@ void process(NnagaPluginHandle handle, const float* inputLeft, const float* inpu
     shuffle->expectedTransportFrame = context->transport_frame + frames;
 }
 
-constexpr NnagaScalePointV1 kEnabledPoints[] = {
-    {sizeof(NnagaScalePointV1), 0.0f, "Off"}, {sizeof(NnagaScalePointV1), 1.0f, "On"},
+constexpr NnagaScalePointV2 kEnabledPoints[] = {
+    {sizeof(NnagaScalePointV2), 0.0f, "Off"}, {sizeof(NnagaScalePointV2), 1.0f, "On"},
 };
-constexpr NnagaScalePointV1 kGridLengths[] = {
-    {sizeof(NnagaScalePointV1), 0.0f, "1/32"}, {sizeof(NnagaScalePointV1), 0.2f, "1/16"},
-    {sizeof(NnagaScalePointV1), 0.4f, "1/8"}, {sizeof(NnagaScalePointV1), 0.6f, "1/4"},
-    {sizeof(NnagaScalePointV1), 0.8f, "1/2"}, {sizeof(NnagaScalePointV1), 1.0f, "1 bar"},
+constexpr NnagaScalePointV2 kGridLengths[] = {
+    {sizeof(NnagaScalePointV2), 0.0f, "1/32"}, {sizeof(NnagaScalePointV2), 0.2f, "1/16"},
+    {sizeof(NnagaScalePointV2), 0.4f, "1/8"}, {sizeof(NnagaScalePointV2), 0.6f, "1/4"},
+    {sizeof(NnagaScalePointV2), 0.8f, "1/2"}, {sizeof(NnagaScalePointV2), 1.0f, "1 bar"},
 };
-constexpr NnagaScalePointV1 kGridModes[] = {
-    {sizeof(NnagaScalePointV1), 0.0f, "No dotted or triplets"},
-    {sizeof(NnagaScalePointV1), 0.2f, "Allow dotted"},
-    {sizeof(NnagaScalePointV1), 0.4f, "Allow triplets"},
-    {sizeof(NnagaScalePointV1), 0.6f, "Use dotted"},
-    {sizeof(NnagaScalePointV1), 0.8f, "Use triplets"},
-    {sizeof(NnagaScalePointV1), 1.0f, "Allow dotted and triplets"},
+constexpr NnagaScalePointV2 kGridModes[] = {
+    {sizeof(NnagaScalePointV2), 0.0f, "No dotted or triplets"},
+    {sizeof(NnagaScalePointV2), 0.2f, "Allow dotted"},
+    {sizeof(NnagaScalePointV2), 0.4f, "Allow triplets"},
+    {sizeof(NnagaScalePointV2), 0.6f, "Use dotted"},
+    {sizeof(NnagaScalePointV2), 0.8f, "Use triplets"},
+    {sizeof(NnagaScalePointV2), 1.0f, "Allow dotted and triplets"},
 };
-constexpr NnagaScalePointV1 kTripletModes[] = {
-    {sizeof(NnagaScalePointV1), 0.0f, "Retrigger same segment"},
-    {sizeof(NnagaScalePointV1), 1.0f, "Use separate segments"},
+constexpr NnagaScalePointV2 kTripletModes[] = {
+    {sizeof(NnagaScalePointV2), 0.0f, "Retrigger same segment"},
+    {sizeof(NnagaScalePointV2), 1.0f, "Use separate segments"},
 };
-constexpr NnagaParameterV1 kParameters[] = {
-    {sizeof(NnagaParameterV1), kEnabledPort, "Enabled", "enabled", "", NNAGA_PARAMETER_TOGGLE, 1.0f, 2, kEnabledPoints, 0},
-    {sizeof(NnagaParameterV1), kAmountPort, "Shuffle", "shuffle", "%", 0, 1.0f, 0, nullptr, 0},
-    {sizeof(NnagaParameterV1), kSeedPort, "Seed", "seed", "", 0, 0.0f, 0, nullptr, 0},
-    {sizeof(NnagaParameterV1), kMixPort, "Mix", "mix", "%", 0, 1.0f, 0, nullptr, 0},
-    {sizeof(NnagaParameterV1), kBarsPort, "Bars", "bars", "", 0, 0.0f, 0, nullptr, 7},
-    {sizeof(NnagaParameterV1), kStartPort, "Shuffle start position", "shuffle_start_position", "", 0, 0.0f, 0, nullptr, 128},
-    {sizeof(NnagaParameterV1), kEndPort, "Shuffle end position", "shuffle_end_position", "", 0, 1.0f, 0, nullptr, 128},
-    {sizeof(NnagaParameterV1), kGridPort, "Grid", "grid", "", NNAGA_PARAMETER_ENUM, 0.2f, 6, kGridLengths, 0},
-    {sizeof(NnagaParameterV1), kFillFromPort, "Fill length from", "fill_length_from", "", 0, 0.2f, 0, nullptr, 5},
-    {sizeof(NnagaParameterV1), kFillToPort, "Fill length to", "fill_length_to", "", 0, 0.6f, 0, nullptr, 5},
-    {sizeof(NnagaParameterV1), kGridModePort, "Grid mode", "grid_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 6, kGridModes, 0},
-    {sizeof(NnagaParameterV1), kGridSeedPort, "Grid seed", "grid_seed", "", 0, 0.0f, 0, nullptr, 0},
-    {sizeof(NnagaParameterV1), kTripletModePort, "Triplet mode", "triplet_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 2, kTripletModes, 0},
+constexpr NnagaParameterV2 kParameters[] = {
+    {sizeof(NnagaParameterV2), kEnabledPort, "Enabled", "enabled", "", NNAGA_PARAMETER_TOGGLE, 1.0f, 2, kEnabledPoints, 0},
+    {sizeof(NnagaParameterV2), kAmountPort, "Shuffle", "shuffle", "%", 0, 1.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV2), kSeedPort, "Seed", "seed", "", 0, 0.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV2), kMixPort, "Mix", "mix", "%", 0, 1.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV2), kBarsPort, "Bars", "bars", "", 0, 0.0f, 0, nullptr, 7},
+    {sizeof(NnagaParameterV2), kStartPort, "Shuffle start position", "shuffle_start_position", "", 0, 0.0f, 0, nullptr, 128},
+    {sizeof(NnagaParameterV2), kEndPort, "Shuffle end position", "shuffle_end_position", "", 0, 1.0f, 0, nullptr, 128},
+    {sizeof(NnagaParameterV2), kGridPort, "Grid", "grid", "", NNAGA_PARAMETER_ENUM, 0.2f, 6, kGridLengths, 0},
+    {sizeof(NnagaParameterV2), kFillFromPort, "Fill length from", "fill_length_from", "", 0, 0.2f, 0, nullptr, 5},
+    {sizeof(NnagaParameterV2), kFillToPort, "Fill length to", "fill_length_to", "", 0, 0.6f, 0, nullptr, 5},
+    {sizeof(NnagaParameterV2), kGridModePort, "Grid mode", "grid_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 6, kGridModes, 0},
+    {sizeof(NnagaParameterV2), kGridSeedPort, "Grid seed", "grid_seed", "", 0, 0.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV2), kTripletModePort, "Triplet mode", "triplet_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 2, kTripletModes, 0},
 };
-constexpr NnagaPluginDescriptorV1 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.2.2",
-    2, 2, 13, kParameters, create, destroy, activate, deactivate, reset, setParameter,
-    formatParameter, nullptr, process,
+constexpr NnagaPluginDescriptorV2 kDescriptor = {
+    sizeof(NnagaPluginDescriptorV2), "com.vibes.dsp.shuffle", "shuffle", "NNAGA Shuffle", "NNAGA", "1.2.2",
+    2, 2, 13, NNAGA_NATIVE_MAX_FRAMES, NNAGA_REALTIME_CERTIFIED_IN_PROCESS, kParameters, create, destroy, activate,
+    deactivate, reset, setParameter, formatParameter, nullptr, process,
 };
-const NnagaPluginDescriptorV1* getPlugin(uint32_t index) noexcept {
+const NnagaPluginDescriptorV2* getPlugin(uint32_t index) noexcept {
     return index == 0 ? &kDescriptor : nullptr;
 }
-constexpr NnagaPluginLibraryV1 kLibrary = {
-    sizeof(NnagaPluginLibraryV1), NNAGA_NATIVE_ABI_VERSION, 1, getPlugin,
+constexpr NnagaPluginLibraryV2 kLibrary = {
+    sizeof(NnagaPluginLibraryV2), NNAGA_NATIVE_ABI_VERSION, 1, getPlugin,
 };
 } // namespace
 
-extern "C" NNAGA_NATIVE_EXPORT const NnagaPluginLibraryV1*
+extern "C" NNAGA_NATIVE_EXPORT const NnagaPluginLibraryV2*
 nnaga_plugin_entry(uint32_t hostAbiVersion) noexcept {
     return hostAbiVersion == NNAGA_NATIVE_ABI_VERSION ? &kLibrary : nullptr;
 }

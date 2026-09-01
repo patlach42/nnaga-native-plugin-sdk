@@ -51,6 +51,7 @@ struct Filter {
     float mix_increment;
     uint32_t type_fade_remaining;
     double sample_rate;
+    uint32_t max_frames;
 };
 
 void clear(Filter* filter) noexcept {
@@ -109,9 +110,11 @@ void destroy(NnagaPluginHandle handle) noexcept {
     std::free(handle);
 }
 
-int32_t activate(NnagaPluginHandle handle, double sample_rate, uint32_t) noexcept {
+int32_t activate(NnagaPluginHandle handle, double sample_rate, uint32_t max_frames) noexcept {
     Filter* filter = static_cast<Filter*>(handle);
-    if (!filter || !std::isfinite(sample_rate) || sample_rate < 1000.0) return 0;
+    if (!filter || !std::isfinite(sample_rate) || sample_rate < 1000.0 ||
+        max_frames == 0 || max_frames > NNAGA_NATIVE_MAX_FRAMES) return 0;
+    filter->max_frames = max_frames;
     filter->sample_rate = sample_rate;
     clear(filter);
     filter->g = 0.0f;
@@ -189,9 +192,10 @@ uint32_t latency_frames(NnagaPluginHandle) noexcept { return 0; }
 
 void process(NnagaPluginHandle handle, const float* input_left, const float* input_right,
              float* output_left, float* output_right, uint32_t frames,
-             const NnagaProcessContextV1*) noexcept {
+             const NnagaProcessContextV2*) noexcept {
     Filter* filter = static_cast<Filter*>(handle);
-    if (!filter || !input_left || !input_right || !output_left || !output_right) return;
+    if (!filter || !input_left || !input_right || !output_left || !output_right ||
+        frames == 0 || frames > filter->max_frames) return;
     for (uint32_t i = 0; i < frames; ++i) {
         if (filter->coefficient_ramp_remaining != 0) {
             filter->g += filter->g_increment;
@@ -214,34 +218,34 @@ void process(NnagaPluginHandle handle, const float* input_left, const float* inp
     if (std::fabs(filter->right.ic2eq) < 1.0e-20f) filter->right.ic2eq = 0.0f;
 }
 
-const NnagaScalePointV1 kTypePoints[] = {
-    {sizeof(NnagaScalePointV1), 0.0f, "Low-pass"},
-    {sizeof(NnagaScalePointV1), 1.0f, "High-pass"},
+const NnagaScalePointV2 kTypePoints[] = {
+    {sizeof(NnagaScalePointV2), 0.0f, "Low-pass"},
+    {sizeof(NnagaScalePointV2), 1.0f, "High-pass"},
 };
-const NnagaParameterV1 kParameters[] = {
-    {sizeof(NnagaParameterV1), kTypePort, "Type", "type", "", NNAGA_PARAMETER_ENUM,
+const NnagaParameterV2 kParameters[] = {
+    {sizeof(NnagaParameterV2), kTypePort, "Type", "type", "", NNAGA_PARAMETER_ENUM,
      0.0f, 2, kTypePoints, 0},
-    {sizeof(NnagaParameterV1), kFrequencyPort, "Frequency", "frequency", "Hz", 0,
+    {sizeof(NnagaParameterV2), kFrequencyPort, "Frequency", "frequency", "Hz", 0,
      log_to_normalized(1000.0f, kMinFrequency, kMaxFrequency), 0, nullptr, 0},
-    {sizeof(NnagaParameterV1), kQPort, "Q", "q", "", 0,
+    {sizeof(NnagaParameterV2), kQPort, "Q", "q", "", 0,
      log_to_normalized(0.70710678f, kMinQ, kMaxQ), 0, nullptr, 0},
 };
-const NnagaPluginDescriptorV1 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.filter", "NNAGA Filter", "NNAGA", "1.0.0",
-    2, 2, 3, kParameters, create, destroy, activate, deactivate, reset, set_parameter,
-    format_parameter, latency_frames, process,
+const NnagaPluginDescriptorV2 kDescriptor = {
+    sizeof(NnagaPluginDescriptorV2), "com.vibes.dsp.filter", "filter", "NNAGA Filter", "NNAGA", "1.0.0",
+    2, 2, 3, NNAGA_NATIVE_MAX_FRAMES, NNAGA_REALTIME_CERTIFIED_IN_PROCESS, kParameters, create, destroy, activate,
+    deactivate, reset, set_parameter, format_parameter, latency_frames, process,
 };
 
-const NnagaPluginDescriptorV1* get_plugin(uint32_t index) noexcept {
+const NnagaPluginDescriptorV2* get_plugin(uint32_t index) noexcept {
     return index == 0 ? &kDescriptor : nullptr;
 }
 
-const NnagaPluginLibraryV1 kLibrary = {
-    sizeof(NnagaPluginLibraryV1), NNAGA_NATIVE_ABI_VERSION, 1, get_plugin,
+const NnagaPluginLibraryV2 kLibrary = {
+    sizeof(NnagaPluginLibraryV2), NNAGA_NATIVE_ABI_VERSION, 1, get_plugin,
 };
 } // namespace
 
-extern "C" NNAGA_NATIVE_EXPORT const NnagaPluginLibraryV1*
+extern "C" NNAGA_NATIVE_EXPORT const NnagaPluginLibraryV2*
 nnaga_plugin_entry(uint32_t host_abi_version) noexcept {
     return host_abi_version == NNAGA_NATIVE_ABI_VERSION ? &kLibrary : nullptr;
 }

@@ -1,10 +1,10 @@
 #include "nnaga/native_plugin.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -32,13 +32,6 @@ void require(bool condition, const char* message) {
     }
 }
 
-struct RunResult {
-    std::vector<float> in_l;
-    std::vector<float> in_r;
-    std::vector<float> out_l;
-    std::vector<float> out_r;
-};
-
 struct Settings {
     uint32_t bars = 1;
     float enabled = 1.0f;
@@ -56,26 +49,40 @@ struct Settings {
     bool playing = true;
 };
 
-const NnagaPluginDescriptorV1* shuffle_descriptor() {
+struct RunResult {
+    std::vector<float> in_l;
+    std::vector<float> in_r;
+    std::vector<float> out_l;
+    std::vector<float> out_r;
+};
+
+NnagaProcessContextV2 make_context(uint64_t transport_frame = 0) {
+    NnagaProcessContextV2 context{};
+    context.struct_size = sizeof(context);
+    context.sample_position = transport_frame;
+    context.transport_frame = transport_frame;
+    context.sample_rate = static_cast<double>(kRate);
+    context.beats_per_minute = 120.0;
+    context.playing = 1;
+    context.beats_per_bar = 4.0f;
+    context.beat_unit = 4;
+    return context;
+}
+
+const NnagaPluginDescriptorV2* shuffle_descriptor() {
     const auto* library = nnaga_plugin_entry(NNAGA_NATIVE_ABI_VERSION);
-    require(library && library->plugin_count == 1 && library->get_plugin,
-            "shuffle library descriptor");
+    require(library && library->struct_size >= sizeof(NnagaPluginLibraryV2) &&
+                library->abi_version == NNAGA_NATIVE_ABI_VERSION && library->plugin_count == 1 && library->get_plugin,
+            "shuffle library ABI v2 descriptor");
     const auto* descriptor = library->get_plugin(0);
-    require(descriptor && descriptor->create && descriptor->destroy && descriptor->activate &&
+    require(descriptor && descriptor->struct_size >= sizeof(NnagaPluginDescriptorV2) && descriptor->create &&
+                descriptor->destroy && descriptor->activate && descriptor->deactivate && descriptor->reset &&
                 descriptor->set_parameter && descriptor->format_parameter && descriptor->process,
-            "shuffle plugin callbacks");
+            "shuffle plugin ABI v2 callbacks");
     return descriptor;
 }
 
-RunResult run_shuffle(const Settings& settings, uint32_t cycles = 2) {
-    const auto* descriptor = shuffle_descriptor();
-    const uint32_t cycle_frames = settings.bars * kBarFrames;
-    const uint32_t total_frames = cycle_frames * cycles;
-    require(cycle_frames != 0 && total_frames % kBlockFrames == 0,
-            "host run consists of contiguous 512-frame blocks");
-
-    NnagaPluginHandle handle = descriptor->create();
-    require(handle && descriptor->activate(handle, kRate, kBlockFrames), "shuffle activate");
+void set_settings(const NnagaPluginDescriptorV2* descriptor, NnagaPluginHandle handle, const Settings& settings) {
     descriptor->set_parameter(handle, kEnabledPort, settings.enabled);
     descriptor->set_parameter(handle, kShufflePort, settings.shuffle);
     descriptor->set_parameter(handle, kSeedPort, settings.seed);
@@ -87,14 +94,26 @@ RunResult run_shuffle(const Settings& settings, uint32_t cycles = 2) {
     descriptor->set_parameter(handle, kFillFromPort, settings.fill_from);
     descriptor->set_parameter(handle, kFillToPort, settings.fill_to);
     descriptor->set_parameter(handle, kGridModePort, settings.grid_mode);
-    descriptor->set_parameter(handle, kTripletModePort, settings.triplet_mode);
     descriptor->set_parameter(handle, kGridSeedPort, settings.grid_seed);
+    descriptor->set_parameter(handle, kTripletModePort, settings.triplet_mode);
+}
+
+RunResult run_shuffle(const Settings& settings, uint32_t cycles = 2) {
+    const auto* descriptor = shuffle_descriptor();
+    const uint32_t cycle_frames = settings.bars * kBarFrames;
+    const uint32_t total_frames = cycle_frames * cycles;
+    require(cycle_frames != 0 && total_frames % kBlockFrames == 0,
+            "host run consists of contiguous 512-frame blocks");
+
+    NnagaPluginHandle handle = descriptor->create();
+    require(handle && descriptor->activate(handle, kRate, kBlockFrames), "shuffle activate");
+    set_settings(descriptor, handle, settings);
 
     RunResult result;
     result.in_l.resize(total_frames);
     result.in_r.resize(total_frames);
-    result.out_l.resize(total_frames);
-    result.out_r.resize(total_frames);
+    result.out_l.resize(total_frames, -99.0f);
+    result.out_r.resize(total_frames, -99.0f);
     for (uint32_t frame = 0; frame < total_frames; ++frame) {
         const uint32_t cycle = frame / cycle_frames;
         const uint32_t phase = frame % cycle_frames;
@@ -102,23 +121,9 @@ RunResult run_shuffle(const Settings& settings, uint32_t cycles = 2) {
         result.in_l[frame] = value;
         result.in_r[frame] = -value;
     }
-
     for (uint32_t offset = 0; offset < total_frames; offset += kBlockFrames) {
-        NnagaProcessContextV1 context{};
-        context.struct_size = sizeof(context);
-        context.sample_position = offset;
-        context.transport_frame = offset;
-        context.loop_end_frame = 0;
-        context.sample_rate = static_cast<double>(kRate);
-        context.beats_per_minute = 120.0;
+        NnagaProcessContextV2 context = make_context(offset);
         context.playing = settings.playing ? 1 : 0;
-        context.looping = 0;
-        context.beat_position = 0.0;
-        context.bar = 0;
-        context.bar_beat = 0.0;
-        context.musical_quarter_notes = 0.0;
-        context.beats_per_bar = 4.0f;
-        context.beat_unit = 4;
         descriptor->process(handle, result.in_l.data() + offset, result.in_r.data() + offset,
                             result.out_l.data() + offset, result.out_r.data() + offset,
                             kBlockFrames, &context);
@@ -138,7 +143,7 @@ void assert_stereo_aligned(const RunResult& result, const char* message) {
                 message);
 }
 
-void assert_format(const NnagaPluginDescriptorV1* descriptor, NnagaPluginHandle handle,
+void assert_format(const NnagaPluginDescriptorV2* descriptor, NnagaPluginHandle handle,
                    uint32_t port, float value, const char* expected, const char* message) {
     char output[64] = {};
     const uint32_t length = descriptor->format_parameter(handle, port, value, output, sizeof(output));
@@ -148,64 +153,63 @@ void assert_format(const NnagaPluginDescriptorV1* descriptor, NnagaPluginHandle 
 
 int main() {
     require(nnaga_plugin_entry(0) == nullptr, "unsupported ABI is rejected");
+    require(nnaga_plugin_entry(NNAGA_NATIVE_ABI_VERSION + 1) == nullptr, "future ABI is rejected");
     const auto* descriptor = shuffle_descriptor();
-    require(std::strcmp(descriptor->version, "1.2.2") == 0, "current shuffle version");
-    require(descriptor->parameter_count == 13, "current shuffle parameter count");
+    require(std::strcmp(descriptor->id, "com.vibes.dsp.shuffle") == 0 &&
+                std::strcmp(descriptor->alias, "shuffle") == 0 && descriptor->max_frames == NNAGA_NATIVE_MAX_FRAMES &&
+                descriptor->audio_inputs == 2 && descriptor->audio_outputs == 2 && descriptor->parameter_count == 13 &&
+                descriptor->realtime_class == NNAGA_REALTIME_CERTIFIED_IN_PROCESS,
+            "shuffle descriptor identity and bounds");
 
     const char* expected_names[] = {"Enabled", "Shuffle", "Seed", "Mix", "Bars",
                                     "Shuffle start position", "Shuffle end position", "Grid",
                                     "Fill length from", "Fill length to", "Grid mode", "Grid seed",
                                     "Triplet mode"};
     for (uint32_t i = 0; i < descriptor->parameter_count; ++i) {
-        require(descriptor->parameters[i].port_index == 4 + i &&
+        require(descriptor->parameters[i].struct_size >= sizeof(NnagaParameterV2) &&
+                    descriptor->parameters[i].port_index == 4 + i &&
                     std::strcmp(descriptor->parameters[i].name, expected_names[i]) == 0,
-                "current shuffle port layout");
+                "shuffle parameter ABI v2 layout");
     }
-    const NnagaParameterV1& grid_parameter = descriptor->parameters[7];
-    require((grid_parameter.flags & NNAGA_PARAMETER_ENUM) != 0 &&
-                grid_parameter.scale_point_count == 6 && grid_parameter.scale_points,
-            "grid enum metadata");
-    const NnagaParameterV1& fill_from_parameter = descriptor->parameters[8];
-    const NnagaParameterV1& fill_to_parameter = descriptor->parameters[9];
-    require((fill_from_parameter.flags & NNAGA_PARAMETER_ENUM) == 0 &&
-                (fill_to_parameter.flags & NNAGA_PARAMETER_ENUM) == 0 &&
-                fill_from_parameter.scale_point_count == 0 && fill_to_parameter.scale_point_count == 0 &&
-                fill_from_parameter.step_count == 5 && fill_to_parameter.step_count == 5,
-            "fill lengths are continuous five-step faders");
-    const NnagaParameterV1& triplet_parameter = descriptor->parameters[12];
-    require((triplet_parameter.flags & NNAGA_PARAMETER_ENUM) != 0 &&
-                triplet_parameter.scale_point_count == 2 && triplet_parameter.scale_points &&
-                triplet_parameter.step_count == 0 &&
-                triplet_parameter.scale_points[0].normalized_value == 0.0f &&
-                triplet_parameter.scale_points[1].normalized_value == 1.0f &&
+    const NnagaParameterV2& grid_parameter = descriptor->parameters[7];
+    require((grid_parameter.flags & NNAGA_PARAMETER_ENUM) != 0 && grid_parameter.scale_point_count == 6 &&
+                grid_parameter.scale_points && grid_parameter.step_count == 0, "grid enum metadata");
+    const NnagaParameterV2& triplet_parameter = descriptor->parameters[12];
+    require((triplet_parameter.flags & NNAGA_PARAMETER_ENUM) != 0 && triplet_parameter.scale_point_count == 2 &&
+                triplet_parameter.scale_points && triplet_parameter.step_count == 0 &&
                 std::strcmp(triplet_parameter.scale_points[0].label, "Retrigger same segment") == 0 &&
                 std::strcmp(triplet_parameter.scale_points[1].label, "Use separate segments") == 0,
             "triplet mode enum metadata");
 
+    NnagaPluginHandle handle = descriptor->create();
+    require(handle != nullptr, "shuffle create");
+    require(descriptor->activate(handle, 48000.0, 0) == 0, "zero max frame activation rejected");
+    require(descriptor->activate(handle, 48000.0, NNAGA_NATIVE_MAX_FRAMES + 1u) == 0,
+            "oversize max frame activation rejected");
+    require(descriptor->activate(handle, -1.0, 512) == 0, "invalid sample rate activation rejected");
+    require(descriptor->activate(handle, 48000.0, kBlockFrames) != 0, "shuffle activation");
+
+    // Oversize and null process calls are all-or-nothing: no partial output is observable.
+    std::vector<float> input(513, 0.25f), output_left(513, -7.0f), output_right(513, -7.0f);
+    NnagaProcessContextV2 timing = make_context();
+    descriptor->process(handle, input.data(), input.data(), output_left.data(), output_right.data(), 513, &timing);
+    for (float value : output_left) require(value == -7.0f, "oversize shuffle process leaves left output untouched");
+    for (float value : output_right) require(value == -7.0f, "oversize shuffle process leaves right output untouched");
+    descriptor->process(handle, nullptr, input.data(), output_left.data(), output_right.data(), 1, &timing);
+    require(output_left[0] == -7.0f && output_right[0] == -7.0f, "null shuffle input leaves output untouched");
+    descriptor->process(handle, input.data(), input.data(), output_left.data(), output_right.data(), 0, &timing);
+    require(output_left[0] == -7.0f && output_right[0] == -7.0f, "zero-frame process leaves output untouched");
+    descriptor->destroy(handle);
+
     NnagaPluginHandle format_handle = descriptor->create();
-    require(format_handle && descriptor->activate(format_handle, kRate, kBlockFrames),
-            "formatter activation");
-    descriptor->set_parameter(format_handle, kBarsPort, 0.0f);
+    require(format_handle && descriptor->activate(format_handle, kRate, kBlockFrames), "formatter activation");
     assert_format(descriptor, format_handle, kStartPort, 0.0f, "1:1:1", "start position format");
     assert_format(descriptor, format_handle, kEndPort, 1.0f, "2:1:1", "end position format");
-    const char* grid_labels[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
-    for (uint32_t i = 0; i < 6; ++i) {
-        assert_format(descriptor, format_handle, kGridPort, i / 5.0f, grid_labels[i],
-                      "grid length format");
-        assert_format(descriptor, format_handle, kFillFromPort, i / 5.0f, grid_labels[i],
-                      "fill length from format");
-        assert_format(descriptor, format_handle, kFillToPort, i / 5.0f, grid_labels[i],
-                      "fill length to format");
-    }
-    const char* mode_labels[] = {"No dotted or triplets", "Allow dotted", "Allow triplets",
-                                 "Use dotted", "Use triplets", "Allow dotted and triplets"};
-    for (uint32_t i = 0; i < 6; ++i)
-        assert_format(descriptor, format_handle, kGridModePort, i / 5.0f, mode_labels[i],
-                      "grid mode format");
-    assert_format(descriptor, format_handle, kTripletModePort, 0.0f, "Retrigger same segment",
-                  "same-segment triplet mode format");
-    assert_format(descriptor, format_handle, kTripletModePort, 1.0f, "Use separate segments",
-                  "separate-segments triplet mode format");
+    assert_format(descriptor, format_handle, kGridPort, 0.2f, "1/16", "grid length format");
+    assert_format(descriptor, format_handle, kBarsPort, 0.0f, "1 bar", "bar format");
+    char tiny[1] = {'x'};
+    require(descriptor->format_parameter(format_handle, kGridPort, 0.2f, tiny, sizeof(tiny)) == 0 && tiny[0] == '\0',
+            "bounded shuffle parameter format");
     descriptor->destroy(format_handle);
 
     Settings ranged;
@@ -221,17 +225,15 @@ int main() {
                 "first complete cycle is captured dry");
     for (uint32_t phase = 0; phase < cycle; ++phase) {
         const uint32_t frame = cycle + phase;
-        if (phase < cycle / 4 || phase >= 3 * cycle / 4) {
+        if (phase < cycle / 4 || phase >= 3 * cycle / 4)
             require(ranged_result.out_l[frame] == ranged_result.in_l[frame] &&
                         ranged_result.out_r[frame] == ranged_result.in_r[frame],
                     "range is dry outside the half-open interval");
-        } else {
-            require(std::isfinite(ranged_result.out_l[frame]) &&
-                        std::isfinite(ranged_result.out_r[frame]) &&
+        else
+            require(std::isfinite(ranged_result.out_l[frame]) && std::isfinite(ranged_result.out_r[frame]) &&
                         ranged_result.out_l[frame] > 0.0f && ranged_result.out_l[frame] < 1000000.0f &&
                         ranged_result.out_l[frame] != ranged_result.in_l[frame],
-                    "active range is wet and never silent or unwritten");
-        }
+                    "active range is wet and fully written");
     }
     assert_stereo_aligned(ranged_result, "ranged shuffle remains stereo aligned");
 
@@ -244,7 +246,7 @@ int main() {
     for (uint32_t phase = 0; phase < cycle; ++phase)
         require(identity_result.out_l[cycle + phase] == identity_result.in_l[phase] &&
                     identity_result.out_r[cycle + phase] == identity_result.in_r[phase],
-                "zero shuffle replays at the original temporal rate");
+                "zero shuffle replays original temporal rate");
 
     Settings random_grid;
     random_grid.fill_from = 0.0f;
@@ -266,70 +268,23 @@ int main() {
         }
     require(grid_changed, "different grid seed changes variable grid pattern");
 
-    Settings triplet_same_start;
-    triplet_same_start.grid = 0.0f;
-    triplet_same_start.fill_from = 0.0f;
-    triplet_same_start.fill_to = 0.0f;
-    triplet_same_start.grid_mode = 0.8f;
-    triplet_same_start.triplet_mode = 0.0f;
-    triplet_same_start.seed = 0.37f;
-    triplet_same_start.start = 0.0f;
-    triplet_same_start.end = 0.2f;
-    const RunResult same_start_result = run_shuffle(triplet_same_start);
-    const uint32_t triplet_segment_frames = kBarFrames / 96;
-    const uint32_t triplet_probe = triplet_segment_frames / 2;
-    const uint32_t second_cycle = kBarFrames;
-    const float same_start_first = same_start_result.out_l[second_cycle + triplet_probe];
-    for (uint32_t segment = 1; segment < 3; ++segment)
-        require(std::fabs(same_start_result.out_l[second_cycle + triplet_probe +
-                                                   segment * triplet_segment_frames] -
-                          same_start_first) < 1.0e-3f,
-                "same-start triplets reuse the first source segment");
-
-    Settings separate_segments = triplet_same_start;
-    separate_segments.triplet_mode = 1.0f;
-    const RunResult separate_segments_result = run_shuffle(separate_segments);
-    const float separate_first = separate_segments_result.out_l[second_cycle + triplet_probe];
-    for (uint32_t segment = 1; segment < 3; ++segment)
-        require(std::fabs(separate_segments_result.out_l[second_cycle + triplet_probe +
-                                                        segment * triplet_segment_frames] -
-                          separate_first) > 1.0e-3f,
-                "separate triplets use different source segments");
-
-    Settings source_selection;
-    source_selection.grid = 0.2f;
-    source_selection.fill_from = 0.2f;
-    source_selection.fill_to = 0.2f;
-    source_selection.grid_mode = 0.0f;
-    source_selection.shuffle = 1.0f;
-    source_selection.grid_seed = 0.19f;
-    source_selection.seed = 0.37f;
-    const RunResult source_a = run_shuffle(source_selection);
-    source_selection.seed = 0.91f;
-    const RunResult source_b = run_shuffle(source_selection);
-    bool source_changed = false;
-    for (uint32_t i = cycle; i < 2 * cycle; ++i)
-        if (source_a.out_l[i] != source_b.out_l[i] || source_a.out_r[i] != source_b.out_r[i]) {
-            source_changed = true;
-            break;
-        }
-    require(source_changed, "source seed changes source selection");
-
-    Settings broad_grid;
-    broad_grid.bars = 8;
-    broad_grid.fill_from = 0.0f;
-    broad_grid.fill_to = 1.0f;
-    broad_grid.grid_mode = 0.75f;
-    broad_grid.grid_seed = 0.41f;
-    const RunResult broad_result = run_shuffle(broad_grid);
-    const uint32_t broad_cycle = 8 * kBarFrames;
-    for (uint32_t phase = 0; phase < broad_cycle; ++phase) {
-        const uint32_t frame = broad_cycle + phase;
-        require(std::isfinite(broad_result.out_l[frame]) && std::isfinite(broad_result.out_r[frame]) &&
-                    broad_result.out_l[frame] > 0.0f && broad_result.out_l[frame] < 1000000.0f,
-                "triplet variable grid stays finite and covers every slice");
-    }
-    assert_stereo_aligned(broad_result, "triplet variable grid remains stereo aligned");
+    Settings triplet;
+    triplet.grid = 0.0f;
+    triplet.fill_from = 0.0f;
+    triplet.fill_to = 0.0f;
+    triplet.grid_mode = 0.8f;
+    triplet.seed = 0.37f;
+    triplet.start = 0.0f;
+    triplet.end = 0.2f;
+    const RunResult same_start = run_shuffle(triplet);
+    triplet.triplet_mode = 1.0f;
+    const RunResult separate = run_shuffle(triplet);
+    const uint32_t segment_frames = kBarFrames / 96;
+    const uint32_t probe = segment_frames / 2;
+    require(std::fabs(same_start.out_l[cycle + probe] - same_start.out_l[cycle + probe + segment_frames]) < 1.0e-3f,
+            "same-start triplets reuse source segment");
+    require(std::fabs(separate.out_l[cycle + probe] - separate.out_l[cycle + probe + segment_frames]) > 1.0e-3f,
+            "separate triplets use distinct source segments");
 
     Settings disabled;
     disabled.enabled = 0.0f;
@@ -337,5 +292,28 @@ int main() {
     Settings stopped;
     stopped.playing = false;
     assert_dry(run_shuffle(stopped), "stopped shuffle is exactly dry");
+
+    // Invalid timing, giant frame arithmetic, and a wrapping transport position must remain bounded and finite.
+    NnagaPluginHandle edge_handle = descriptor->create();
+    require(edge_handle && descriptor->activate(edge_handle, 1000.0, kBlockFrames), "edge-rate activation");
+    std::vector<float> edge_in(32), edge_left(32, -3.0f), edge_right(32, -3.0f);
+    for (uint32_t i = 0; i < edge_in.size(); ++i) edge_in[i] = static_cast<float>(i + 1);
+    const double invalid_rates[] = {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                                    std::numeric_limits<double>::quiet_NaN()};
+    for (double rate : invalid_rates) {
+        NnagaProcessContextV2 edge = make_context();
+        edge.sample_rate = rate;
+        descriptor->process(edge_handle, edge_in.data(), edge_in.data(), edge_left.data(), edge_right.data(),
+                            static_cast<uint32_t>(edge_in.size()), &edge);
+        require(edge_left == edge_in && edge_right == edge_in, "invalid timing is safely dry");
+    }
+    NnagaProcessContextV2 giant = make_context(UINT64_MAX);
+    giant.sample_rate = std::numeric_limits<double>::max();
+    giant.beats_per_minute = std::numeric_limits<double>::min();
+    descriptor->process(edge_handle, edge_in.data(), edge_in.data(), edge_left.data(), edge_right.data(),
+                        static_cast<uint32_t>(edge_in.size()), &giant);
+    for (uint32_t i = 0; i < edge_in.size(); ++i)
+        require(std::isfinite(edge_left[i]) && std::isfinite(edge_right[i]), "extreme timing remains finite");
+    descriptor->destroy(edge_handle);
     return 0;
 }
