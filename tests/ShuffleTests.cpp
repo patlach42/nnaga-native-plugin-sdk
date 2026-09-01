@@ -23,6 +23,7 @@ constexpr uint32_t kFillFromPort = 12;
 constexpr uint32_t kFillToPort = 13;
 constexpr uint32_t kGridModePort = 14;
 constexpr uint32_t kGridSeedPort = 15;
+constexpr uint32_t kTripletModePort = 16;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -50,6 +51,7 @@ struct Settings {
     float fill_from = 0.2f;
     float fill_to = 0.6f;
     float grid_mode = 0.0f;
+    float triplet_mode = 0.0f;
     float grid_seed = 0.0f;
     bool playing = true;
 };
@@ -85,6 +87,7 @@ RunResult run_shuffle(const Settings& settings, uint32_t cycles = 2) {
     descriptor->set_parameter(handle, kFillFromPort, settings.fill_from);
     descriptor->set_parameter(handle, kFillToPort, settings.fill_to);
     descriptor->set_parameter(handle, kGridModePort, settings.grid_mode);
+    descriptor->set_parameter(handle, kTripletModePort, settings.triplet_mode);
     descriptor->set_parameter(handle, kGridSeedPort, settings.grid_seed);
 
     RunResult result;
@@ -146,12 +149,13 @@ void assert_format(const NnagaPluginDescriptorV1* descriptor, NnagaPluginHandle 
 int main() {
     require(nnaga_plugin_entry(0) == nullptr, "unsupported ABI is rejected");
     const auto* descriptor = shuffle_descriptor();
-    require(std::strcmp(descriptor->version, "1.2.1") == 0, "current shuffle version");
-    require(descriptor->parameter_count == 12, "current shuffle parameter count");
+    require(std::strcmp(descriptor->version, "1.2.2") == 0, "current shuffle version");
+    require(descriptor->parameter_count == 13, "current shuffle parameter count");
 
     const char* expected_names[] = {"Enabled", "Shuffle", "Seed", "Mix", "Bars",
                                     "Shuffle start position", "Shuffle end position", "Grid",
-                                    "Fill length from", "Fill length to", "Grid mode", "Grid seed"};
+                                    "Fill length from", "Fill length to", "Grid mode", "Grid seed",
+                                    "Triplet mode"};
     for (uint32_t i = 0; i < descriptor->parameter_count; ++i) {
         require(descriptor->parameters[i].port_index == 4 + i &&
                     std::strcmp(descriptor->parameters[i].name, expected_names[i]) == 0,
@@ -168,6 +172,15 @@ int main() {
                 fill_from_parameter.scale_point_count == 0 && fill_to_parameter.scale_point_count == 0 &&
                 fill_from_parameter.step_count == 5 && fill_to_parameter.step_count == 5,
             "fill lengths are continuous five-step faders");
+    const NnagaParameterV1& triplet_parameter = descriptor->parameters[12];
+    require((triplet_parameter.flags & NNAGA_PARAMETER_ENUM) != 0 &&
+                triplet_parameter.scale_point_count == 2 && triplet_parameter.scale_points &&
+                triplet_parameter.step_count == 0 &&
+                triplet_parameter.scale_points[0].normalized_value == 0.0f &&
+                triplet_parameter.scale_points[1].normalized_value == 1.0f &&
+                std::strcmp(triplet_parameter.scale_points[0].label, "Retrigger same segment") == 0 &&
+                std::strcmp(triplet_parameter.scale_points[1].label, "Use separate segments") == 0,
+            "triplet mode enum metadata");
 
     NnagaPluginHandle format_handle = descriptor->create();
     require(format_handle && descriptor->activate(format_handle, kRate, kBlockFrames),
@@ -189,6 +202,10 @@ int main() {
     for (uint32_t i = 0; i < 6; ++i)
         assert_format(descriptor, format_handle, kGridModePort, i / 5.0f, mode_labels[i],
                       "grid mode format");
+    assert_format(descriptor, format_handle, kTripletModePort, 0.0f, "Retrigger same segment",
+                  "same-segment triplet mode format");
+    assert_format(descriptor, format_handle, kTripletModePort, 1.0f, "Use separate segments",
+                  "separate-segments triplet mode format");
     descriptor->destroy(format_handle);
 
     Settings ranged;
@@ -248,6 +265,36 @@ int main() {
             break;
         }
     require(grid_changed, "different grid seed changes variable grid pattern");
+
+    Settings triplet_same_start;
+    triplet_same_start.grid = 0.0f;
+    triplet_same_start.fill_from = 0.0f;
+    triplet_same_start.fill_to = 0.0f;
+    triplet_same_start.grid_mode = 0.8f;
+    triplet_same_start.triplet_mode = 0.0f;
+    triplet_same_start.seed = 0.37f;
+    triplet_same_start.start = 0.0f;
+    triplet_same_start.end = 0.2f;
+    const RunResult same_start_result = run_shuffle(triplet_same_start);
+    const uint32_t triplet_segment_frames = kBarFrames / 96;
+    const uint32_t triplet_probe = triplet_segment_frames / 2;
+    const uint32_t second_cycle = kBarFrames;
+    const float same_start_first = same_start_result.out_l[second_cycle + triplet_probe];
+    for (uint32_t segment = 1; segment < 3; ++segment)
+        require(std::fabs(same_start_result.out_l[second_cycle + triplet_probe +
+                                                   segment * triplet_segment_frames] -
+                          same_start_first) < 1.0e-3f,
+                "same-start triplets reuse the first source segment");
+
+    Settings separate_segments = triplet_same_start;
+    separate_segments.triplet_mode = 1.0f;
+    const RunResult separate_segments_result = run_shuffle(separate_segments);
+    const float separate_first = separate_segments_result.out_l[second_cycle + triplet_probe];
+    for (uint32_t segment = 1; segment < 3; ++segment)
+        require(std::fabs(separate_segments_result.out_l[second_cycle + triplet_probe +
+                                                        segment * triplet_segment_frames] -
+                          separate_first) > 1.0e-3f,
+                "separate triplets use different source segments");
 
     Settings source_selection;
     source_selection.grid = 0.2f;

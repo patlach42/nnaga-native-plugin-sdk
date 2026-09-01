@@ -18,6 +18,7 @@ constexpr uint32_t kGridPort = 11;
 constexpr uint32_t kFillFromPort = 12;
 constexpr uint32_t kFillToPort = 13;
 constexpr uint32_t kGridModePort = 14;
+constexpr uint32_t kTripletModePort = 16;
 constexpr uint32_t kGridSeedPort = 15;
 constexpr uint32_t kMaxSlices = 512;
 constexpr uint32_t kRingSeconds = 64;
@@ -63,6 +64,7 @@ struct Shuffle {
     float fillFrom = 0.2f;
     float fillTo = 0.6f;
     float gridMode = 0.0f;
+    float tripletMode = 0.0f;
     float gridSeed = 0.0f;
     float previousLeft = 0.0f;
     float previousRight = 0.0f;
@@ -145,31 +147,47 @@ uint32_t makeMotif(GridVariant variant, uint32_t baseUnits, uint32_t* lengths) n
     return 1;
 }
 
+uint64_t chooseSourceStart(Shuffle* shuffle, uint64_t loopFrames, uint64_t segmentLength,
+                           uint64_t gridFrames, uint64_t destinationStart) noexcept {
+    const bool randomize = shuffle->amount > 0.0f &&
+        (shuffle->amount >= 1.0f ||
+         nextRandom(shuffle->sourceRng) / static_cast<float>(UINT32_MAX) <= shuffle->amount);
+    if (!randomize || segmentLength >= loopFrames) return destinationStart;
+    const uint64_t maxStart = loopFrames - segmentLength;
+    return gridFrames * (nextRandom(shuffle->sourceRng) % (maxStart / gridFrames + 1));
+}
+
 bool appendMotif(Shuffle* shuffle, uint64_t loopFrames, uint32_t totalUnits,
                  uint32_t gridUnits, uint64_t destinationUnits, const uint32_t* lengths,
-                 uint32_t count, uint32_t groupUnits) noexcept {
+                 uint32_t count, uint32_t groupUnits, GridVariant variant) noexcept {
     if (shuffle->sliceCount + count > kMaxSlices) return false;
     const uint64_t destinationStart = destinationUnits * loopFrames / totalUnits;
     const uint64_t destinationEnd = (destinationUnits + groupUnits) * loopFrames / totalUnits;
     if (destinationEnd <= destinationStart) return false;
     const uint64_t groupLength = destinationEnd - destinationStart;
-    const bool randomize = shuffle->amount > 0.0f &&
-        (shuffle->amount >= 1.0f ||
-         nextRandom(shuffle->sourceRng) / static_cast<float>(UINT32_MAX) <= shuffle->amount);
     const uint64_t gridFrames = std::max<uint64_t>(1, gridUnits * loopFrames / totalUnits);
-    const uint64_t sourceStart = randomize && groupLength < loopFrames
-        ? gridFrames * (nextRandom(shuffle->sourceRng) % ((loopFrames - groupLength) / gridFrames + 1))
-        : destinationStart;
+    const uint64_t groupSourceStart =
+        chooseSourceStart(shuffle, loopFrames, groupLength, gridFrames, destinationStart);
     uint64_t offsetUnits = 0;
     for (uint32_t i = 0; i < count; ++i) {
         const uint64_t segmentStart = (destinationUnits + offsetUnits) * loopFrames / totalUnits;
         const uint64_t segmentEnd =
             (destinationUnits + offsetUnits + lengths[i]) * loopFrames / totalUnits;
         if (segmentEnd <= segmentStart) return false;
+        const uint64_t segmentLength = segmentEnd - segmentStart;
+        const bool separateTripletSegments =
+            variant == GridVariant::Triplet && shuffle->tripletMode >= 0.5f;
+        const uint64_t sourceStart = separateTripletSegments
+            ? chooseSourceStart(shuffle, loopFrames, segmentLength, gridFrames, segmentStart)
+            : groupSourceStart;
         Slice& slice = shuffle->slices[shuffle->sliceCount++];
         slice.destinationStart = segmentStart;
         slice.destinationEnd = segmentEnd;
-        slice.sourceStart = sourceStart + (segmentStart - destinationStart);
+        const bool retriggerSameSegment =
+            variant == GridVariant::Triplet && shuffle->tripletMode < 0.5f;
+        slice.sourceStart = separateTripletSegments || retriggerSameSegment
+            ? sourceStart
+            : sourceStart + (segmentStart - destinationStart);
         offsetUnits += lengths[i];
     }
     return true;
@@ -196,50 +214,29 @@ void makeGrid(Shuffle* shuffle, uint64_t loopFrames, uint64_t cycleNumber) noexc
     uint32_t highFill = gridIndex(shuffle->fillTo);
     if (lowFill > highFill) std::swap(lowFill, highFill);
     const uint32_t gridUnits = gridLengthUnits(gridIndex(shuffle->grid));
-    const uint32_t minFillUnits = gridLengthUnits(lowFill);
-    const uint32_t maxFillUnits = gridLengthUnits(highFill);
-    const uint32_t lowMultiplier = std::max(1u, (minFillUnits + gridUnits - 1) / gridUnits);
-    const uint32_t highMultiplier = std::max(lowMultiplier, maxFillUnits / gridUnits);
     uint64_t cursor = startUnits;
     while (cursor < endUnits) {
         const GridVariant variant = chooseGridVariant(shuffle);
+        const uint32_t fillIndex = lowFill +
+            nextRandom(shuffle->gridRng) % (highFill - lowFill + 1);
+        const uint32_t baseUnits = gridLengthUnits(fillIndex);
         uint32_t lengths[3] = {};
-        const uint32_t multiplier = lowMultiplier +
-            nextRandom(shuffle->gridRng) % (highMultiplier - lowMultiplier + 1);
-        const uint32_t baseUnits = gridUnits * multiplier;
         uint32_t count = makeMotif(variant, baseUnits, lengths);
         uint32_t groupUnits = 0;
         for (uint32_t i = 0; i < count; ++i) groupUnits += lengths[i];
-        const uint64_t remaining = endUnits - cursor;
+        const uint32_t remaining = endUnits - static_cast<uint32_t>(cursor);
         if (groupUnits > remaining) {
-            bool fitted = false;
-            uint32_t candidate = baseUnits;
-            while (true) {
-                uint32_t candidateLengths[3] = {};
-                const uint32_t candidateCount = makeMotif(variant, candidate, candidateLengths);
-                uint32_t candidateUnits = 0;
-                for (uint32_t i = 0; i < candidateCount; ++i) candidateUnits += candidateLengths[i];
-                if (candidateUnits <= remaining) {
-                    count = candidateCount;
-                    groupUnits = candidateUnits;
-                    std::copy(candidateLengths, candidateLengths + candidateCount, lengths);
-                    fitted = true;
-                    break;
-                }
-                if (candidate <= gridUnits) break;
-                candidate -= gridUnits;
-            }
-            if (!fitted) {
-                count = 1;
-                lengths[0] = static_cast<uint32_t>(remaining);
-                groupUnits = lengths[0];
-            }
+            count = 1;
+            lengths[0] = remaining;
+            groupUnits = remaining;
         }
-        if (!appendMotif(shuffle, loopFrames, totalUnits, gridUnits, cursor, lengths, count, groupUnits))
+        if (!appendMotif(shuffle, loopFrames, totalUnits, gridUnits, cursor, lengths, count,
+                         groupUnits, variant))
             break;
         cursor += groupUnits;
     }
 }
+
 
 void resetCapture(Shuffle* shuffle) noexcept {
     shuffle->write = 0;
@@ -341,6 +338,7 @@ void setParameter(NnagaPluginHandle handle, uint32_t port, float value) noexcept
         case kFillToPort: shuffle->fillTo = value; break;
         case kGridModePort: shuffle->gridMode = value; break;
         case kGridSeedPort: shuffle->gridSeed = value; break;
+        case kTripletModePort: shuffle->tripletMode = value; break;
         default: break;
     }
 }
@@ -365,6 +363,9 @@ uint32_t formatParameter(NnagaPluginHandle handle, uint32_t port, float value, c
         };
         std::snprintf(output, capacity, "%s",
                       labels[std::clamp(static_cast<uint32_t>(std::lround(clamp01(value) * 5.0f)), 0u, 5u)]);
+    } else if (port == kTripletModePort) {
+        constexpr const char* labels[2] = {"Retrigger same segment", "Use separate segments"};
+        std::snprintf(output, capacity, "%s", labels[clamp01(value) >= 0.5f ? 1 : 0]);
     } else if (port == kGridSeedPort) {
         std::snprintf(output, capacity, "%u", static_cast<uint32_t>(clamp01(value) * 65535.0f));
     } else if (port == kBarsPort) {
@@ -479,6 +480,10 @@ constexpr NnagaScalePointV1 kGridModes[] = {
     {sizeof(NnagaScalePointV1), 0.8f, "Use triplets"},
     {sizeof(NnagaScalePointV1), 1.0f, "Allow dotted and triplets"},
 };
+constexpr NnagaScalePointV1 kTripletModes[] = {
+    {sizeof(NnagaScalePointV1), 0.0f, "Retrigger same segment"},
+    {sizeof(NnagaScalePointV1), 1.0f, "Use separate segments"},
+};
 constexpr NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kEnabledPort, "Enabled", "enabled", "", NNAGA_PARAMETER_TOGGLE, 1.0f, 2, kEnabledPoints, 0},
     {sizeof(NnagaParameterV1), kAmountPort, "Shuffle", "shuffle", "%", 0, 1.0f, 0, nullptr, 0},
@@ -492,10 +497,11 @@ constexpr NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kFillToPort, "Fill length to", "fill_length_to", "", 0, 0.6f, 0, nullptr, 5},
     {sizeof(NnagaParameterV1), kGridModePort, "Grid mode", "grid_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 6, kGridModes, 0},
     {sizeof(NnagaParameterV1), kGridSeedPort, "Grid seed", "grid_seed", "", 0, 0.0f, 0, nullptr, 0},
+    {sizeof(NnagaParameterV1), kTripletModePort, "Triplet mode", "triplet_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 2, kTripletModes, 0},
 };
 constexpr NnagaPluginDescriptorV1 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.2.1",
-    2, 2, 12, kParameters, create, destroy, activate, deactivate, reset, setParameter,
+    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.2.2",
+    2, 2, 13, kParameters, create, destroy, activate, deactivate, reset, setParameter,
     formatParameter, nullptr, process,
 };
 const NnagaPluginDescriptorV1* getPlugin(uint32_t index) noexcept {

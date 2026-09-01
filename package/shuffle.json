@@ -2,7 +2,7 @@
   "repository_id": "native.nnaga-shuffle",
   "descriptor_id": "com.vibes.dsp.shuffle",
   "name": "NNAGA Shuffle",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "source": "https://github.com/patlach42/nnaga-native-plugin-sdk",
   "manufacturer": "NNAGA",
   "category": "Glitch",
