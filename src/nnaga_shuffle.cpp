@@ -404,13 +404,13 @@ constexpr NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kBarsPort, "Bars", "bars", "", 0, 0.0f, 0, nullptr, 7},
     {sizeof(NnagaParameterV1), kStartPort, "Shuffle start position", "shuffle_start_position", "", 0, 0.0f, 0, nullptr, 128},
     {sizeof(NnagaParameterV1), kEndPort, "Shuffle end position", "shuffle_end_position", "", 0, 1.0f, 0, nullptr, 128},
-    {sizeof(NnagaParameterV1), kGridFromPort, "Grid from", "grid_from", "", NNAGA_PARAMETER_ENUM, 0.2f, 6, kGridLengths, 0},
-    {sizeof(NnagaParameterV1), kGridToPort, "Grid to", "grid_to", "", NNAGA_PARAMETER_ENUM, 0.6f, 6, kGridLengths, 0},
+    {sizeof(NnagaParameterV1), kGridFromPort, "Grid from", "grid_from", "", 0, 0.2f, 0, nullptr, 5},
+    {sizeof(NnagaParameterV1), kGridToPort, "Grid to", "grid_to", "", 0, 0.6f, 0, nullptr, 5},
     {sizeof(NnagaParameterV1), kGridModePort, "Grid mode", "grid_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 5, kGridModes, 0},
     {sizeof(NnagaParameterV1), kGridSeedPort, "Grid seed", "grid_seed", "", 0, 0.0f, 0, nullptr, 0},
 };
 constexpr NnagaPluginDescriptorV1 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.1.0",
+    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.1.1",
     2, 2, 11, kParameters, create, destroy, activate, deactivate, reset, setParameter,
     formatParameter, nullptr, process,
 };
