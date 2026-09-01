@@ -165,10 +165,10 @@ int main() {
     for (uint32_t i = 0; i < 6; ++i)
         assert_format(descriptor, format_handle, kGridFromPort, i / 5.0f, grid_labels[i],
                       "grid length format");
-    const char* mode_labels[] = {"Allow dotted", "Allow triplets", "Use dotted", "Use triplets",
-                                 "Allow dotted and triplets"};
-    for (uint32_t i = 0; i < 5; ++i)
-        assert_format(descriptor, format_handle, kGridModePort, i / 4.0f, mode_labels[i],
+    const char* mode_labels[] = {"No dotted or triplets", "Allow dotted", "Allow triplets",
+                                 "Use dotted", "Use triplets", "Allow dotted and triplets"};
+    for (uint32_t i = 0; i < 6; ++i)
+        assert_format(descriptor, format_handle, kGridModePort, i / 5.0f, mode_labels[i],
                       "grid mode format");
     descriptor->destroy(format_handle);
 

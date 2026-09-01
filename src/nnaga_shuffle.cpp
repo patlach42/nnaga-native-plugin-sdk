@@ -112,13 +112,14 @@ uint32_t gridLengthUnits(uint32_t index) noexcept {
 
 uint32_t chooseGridUnits(Shuffle* shuffle, uint32_t low, uint32_t high) noexcept {
     const uint32_t baseUnits = gridLengthUnits(low + nextRandom(shuffle->gridRng) % (high - low + 1));
-    const uint32_t mode = std::clamp(static_cast<uint32_t>(std::lround(clamp01(shuffle->gridMode) * 4.0f)), 0u, 4u);
-    if (mode == 2) return baseUnits * 3 / 2;
-    if (mode == 3) return std::max(1u, baseUnits * 2 / 3);
-    const uint32_t variant = nextRandom(shuffle->gridRng) % (mode == 4 ? 3u : 2u);
+    const uint32_t mode = std::clamp(static_cast<uint32_t>(std::lround(clamp01(shuffle->gridMode) * 5.0f)), 0u, 5u);
+    if (mode == 0) return baseUnits;
+    if (mode == 3) return baseUnits * 3 / 2;
+    if (mode == 4) return std::max(1u, baseUnits * 2 / 3);
+    const uint32_t variant = nextRandom(shuffle->gridRng) % (mode == 5 ? 3u : 2u);
     if (variant == 0) return baseUnits;
-    if (mode == 0) return baseUnits * 3 / 2;
-    if (mode == 1) return std::max(1u, baseUnits * 2 / 3);
+    if (mode == 1) return baseUnits * 3 / 2;
+    if (mode == 2) return std::max(1u, baseUnits * 2 / 3);
     return variant == 1 ? baseUnits * 3 / 2 : std::max(1u, baseUnits * 2 / 3);
 }
 
@@ -279,12 +280,12 @@ uint32_t formatParameter(NnagaPluginHandle handle, uint32_t port, float value, c
         constexpr const char* labels[kGridChoices] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
         std::snprintf(output, capacity, "%s", labels[gridIndex(value)]);
     } else if (port == kGridModePort) {
-        constexpr const char* labels[5] = {"Allow dotted", "Allow triplets", "Use dotted", "Use triplets", "Allow dotted and triplets"};
-        std::snprintf(output, capacity, "%s", labels[std::clamp(static_cast<uint32_t>(std::lround(clamp01(value) * 4.0f)), 0u, 4u)]);
-    } else if (port == kGridSeedPort) {
-        std::snprintf(output, capacity, "%u", static_cast<uint32_t>(clamp01(value) * 65535.0f));
-    } else if (port == kEnabledPort) {
-        std::snprintf(output, capacity, "%s", clamp01(value) >= 0.5f ? "On" : "Off");
+        constexpr const char* labels[6] = {
+            "No dotted or triplets", "Allow dotted", "Allow triplets",
+            "Use dotted", "Use triplets", "Allow dotted and triplets",
+        };
+        std::snprintf(output, capacity, "%s",
+                      labels[std::clamp(static_cast<uint32_t>(std::lround(clamp01(value) * 5.0f)), 0u, 5u)]);
     } else if (port == kBarsPort) {
         const uint32_t bars = barCount(value);
         std::snprintf(output, capacity, "%u %s", bars, bars == 1 ? "bar" : "bars");
@@ -390,10 +391,11 @@ constexpr NnagaScalePointV1 kGridLengths[] = {
     {sizeof(NnagaScalePointV1), 0.8f, "1/2"}, {sizeof(NnagaScalePointV1), 1.0f, "1 bar"},
 };
 constexpr NnagaScalePointV1 kGridModes[] = {
-    {sizeof(NnagaScalePointV1), 0.0f, "Allow dotted"},
-    {sizeof(NnagaScalePointV1), 0.25f, "Allow triplets"},
-    {sizeof(NnagaScalePointV1), 0.5f, "Use dotted"},
-    {sizeof(NnagaScalePointV1), 0.75f, "Use triplets"},
+    {sizeof(NnagaScalePointV1), 0.0f, "No dotted or triplets"},
+    {sizeof(NnagaScalePointV1), 0.2f, "Allow dotted"},
+    {sizeof(NnagaScalePointV1), 0.4f, "Allow triplets"},
+    {sizeof(NnagaScalePointV1), 0.6f, "Use dotted"},
+    {sizeof(NnagaScalePointV1), 0.8f, "Use triplets"},
     {sizeof(NnagaScalePointV1), 1.0f, "Allow dotted and triplets"},
 };
 constexpr NnagaParameterV1 kParameters[] = {
