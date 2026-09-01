@@ -14,10 +14,11 @@ constexpr uint32_t kMixPort = 7;
 constexpr uint32_t kBarsPort = 8;
 constexpr uint32_t kStartPort = 9;
 constexpr uint32_t kEndPort = 10;
-constexpr uint32_t kGridFromPort = 11;
-constexpr uint32_t kGridToPort = 12;
-constexpr uint32_t kGridModePort = 13;
-constexpr uint32_t kGridSeedPort = 14;
+constexpr uint32_t kGridPort = 11;
+constexpr uint32_t kFillFromPort = 12;
+constexpr uint32_t kFillToPort = 13;
+constexpr uint32_t kGridModePort = 14;
+constexpr uint32_t kGridSeedPort = 15;
 constexpr uint32_t kMaxSlices = 512;
 constexpr uint32_t kRingSeconds = 64;
 constexpr uint32_t kCrossfadeFrames = 32;
@@ -58,8 +59,9 @@ struct Shuffle {
     float bars = 0.0f;
     float startPosition = 0.0f;
     float endPosition = 1.0f;
-    float gridFrom = 0.2f;
-    float gridTo = 0.6f;
+    float grid = 0.2f;
+    float fillFrom = 0.2f;
+    float fillTo = 0.6f;
     float gridMode = 0.0f;
     float gridSeed = 0.0f;
     float previousLeft = 0.0f;
@@ -189,37 +191,44 @@ void makeGrid(Shuffle* shuffle, uint64_t loopFrames, uint64_t cycleNumber) noexc
     if (!shuffle->gridRng) shuffle->gridRng = 1;
     if (!shuffle->sourceRng) shuffle->sourceRng = 1;
 
-    uint32_t low = gridIndex(shuffle->gridFrom);
-    uint32_t high = gridIndex(shuffle->gridTo);
-    if (low > high) std::swap(low, high);
+    uint32_t lowFill = gridIndex(shuffle->fillFrom);
+    uint32_t highFill = gridIndex(shuffle->fillTo);
+    if (lowFill > highFill) std::swap(lowFill, highFill);
+    const uint32_t gridUnits = gridLengthUnits(gridIndex(shuffle->grid));
+    const uint32_t minFillUnits = gridLengthUnits(lowFill);
+    const uint32_t maxFillUnits = gridLengthUnits(highFill);
+    const uint32_t lowMultiplier = std::max(1u, (minFillUnits + gridUnits - 1) / gridUnits);
+    const uint32_t highMultiplier = std::max(lowMultiplier, maxFillUnits / gridUnits);
     uint64_t cursor = startUnits;
     while (cursor < endUnits) {
-        GridVariant variant = chooseGridVariant(shuffle);
+        const GridVariant variant = chooseGridVariant(shuffle);
         uint32_t lengths[3] = {};
-        uint32_t baseIndex = low + nextRandom(shuffle->gridRng) % (high - low + 1);
-        uint32_t count = makeMotif(variant, gridLengthUnits(baseIndex), lengths);
+        const uint32_t multiplier = lowMultiplier +
+            nextRandom(shuffle->gridRng) % (highMultiplier - lowMultiplier + 1);
+        const uint32_t baseUnits = gridUnits * multiplier;
+        uint32_t count = makeMotif(variant, baseUnits, lengths);
         uint32_t groupUnits = 0;
         for (uint32_t i = 0; i < count; ++i) groupUnits += lengths[i];
         const uint64_t remaining = endUnits - cursor;
         if (groupUnits > remaining) {
             bool fitted = false;
-            for (int32_t candidate = static_cast<int32_t>(baseIndex); candidate >= 0; --candidate) {
+            uint32_t candidate = baseUnits;
+            while (true) {
                 uint32_t candidateLengths[3] = {};
-                const uint32_t candidateCount =
-                    makeMotif(variant, gridLengthUnits(static_cast<uint32_t>(candidate)), candidateLengths);
+                const uint32_t candidateCount = makeMotif(variant, candidate, candidateLengths);
                 uint32_t candidateUnits = 0;
                 for (uint32_t i = 0; i < candidateCount; ++i) candidateUnits += candidateLengths[i];
                 if (candidateUnits <= remaining) {
-                    baseIndex = static_cast<uint32_t>(candidate);
                     count = candidateCount;
                     groupUnits = candidateUnits;
                     std::copy(candidateLengths, candidateLengths + candidateCount, lengths);
                     fitted = true;
                     break;
                 }
+                if (candidate <= gridUnits) break;
+                candidate -= gridUnits;
             }
             if (!fitted) {
-                variant = GridVariant::Straight;
                 count = 1;
                 lengths[0] = static_cast<uint32_t>(remaining);
                 groupUnits = lengths[0];
@@ -266,8 +275,8 @@ NnagaPluginHandle create() noexcept {
     shuffle->amount = 1.0f;
     shuffle->mix = 1.0f;
     shuffle->endPosition = 1.0f;
-    shuffle->gridFrom = 0.2f;
-    shuffle->gridTo = 0.6f;
+    shuffle->fillFrom = 0.2f;
+    shuffle->fillTo = 0.6f;
     return shuffle;
 }
 
@@ -326,8 +335,9 @@ void setParameter(NnagaPluginHandle handle, uint32_t port, float value) noexcept
         case kBarsPort: shuffle->bars = value; break;
         case kStartPort: shuffle->startPosition = value; break;
         case kEndPort: shuffle->endPosition = value; break;
-        case kGridFromPort: shuffle->gridFrom = value; break;
-        case kGridToPort: shuffle->gridTo = value; break;
+        case kGridPort: shuffle->grid = value; break;
+        case kFillFromPort: shuffle->fillFrom = value; break;
+        case kFillToPort: shuffle->fillTo = value; break;
         case kGridModePort: shuffle->gridMode = value; break;
         case kGridSeedPort: shuffle->gridSeed = value; break;
         default: break;
@@ -344,7 +354,7 @@ uint32_t formatParameter(NnagaPluginHandle handle, uint32_t port, float value, c
     if (!output || !capacity) return 0;
     const auto* shuffle = static_cast<const Shuffle*>(handle);
     if (port == kStartPort || port == kEndPort) formatPosition(shuffle, value, output, capacity);
-    else if (port == kGridFromPort || port == kGridToPort) {
+    else if (port == kGridPort || port == kFillFromPort || port == kFillToPort) {
         constexpr const char* labels[kGridChoices] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
         std::snprintf(output, capacity, "%s", labels[gridIndex(value)]);
     } else if (port == kGridModePort) {
@@ -354,6 +364,8 @@ uint32_t formatParameter(NnagaPluginHandle handle, uint32_t port, float value, c
         };
         std::snprintf(output, capacity, "%s",
                       labels[std::clamp(static_cast<uint32_t>(std::lround(clamp01(value) * 5.0f)), 0u, 5u)]);
+    } else if (port == kGridSeedPort) {
+        std::snprintf(output, capacity, "%u", static_cast<uint32_t>(clamp01(value) * 65535.0f));
     } else if (port == kBarsPort) {
         const uint32_t bars = barCount(value);
         std::snprintf(output, capacity, "%u %s", bars, bars == 1 ? "bar" : "bars");
@@ -474,14 +486,15 @@ constexpr NnagaParameterV1 kParameters[] = {
     {sizeof(NnagaParameterV1), kBarsPort, "Bars", "bars", "", 0, 0.0f, 0, nullptr, 7},
     {sizeof(NnagaParameterV1), kStartPort, "Shuffle start position", "shuffle_start_position", "", 0, 0.0f, 0, nullptr, 128},
     {sizeof(NnagaParameterV1), kEndPort, "Shuffle end position", "shuffle_end_position", "", 0, 1.0f, 0, nullptr, 128},
-    {sizeof(NnagaParameterV1), kGridFromPort, "Grid from", "grid_from", "", 0, 0.2f, 0, nullptr, 5},
-    {sizeof(NnagaParameterV1), kGridToPort, "Grid to", "grid_to", "", 0, 0.6f, 0, nullptr, 5},
-    {sizeof(NnagaParameterV1), kGridModePort, "Grid mode", "grid_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 5, kGridModes, 0},
+    {sizeof(NnagaParameterV1), kGridPort, "Grid", "grid", "", NNAGA_PARAMETER_ENUM, 0.2f, 6, kGridLengths, 0},
+    {sizeof(NnagaParameterV1), kFillFromPort, "Fill length from", "fill_length_from", "", 0, 0.2f, 0, nullptr, 5},
+    {sizeof(NnagaParameterV1), kFillToPort, "Fill length to", "fill_length_to", "", 0, 0.6f, 0, nullptr, 5},
+    {sizeof(NnagaParameterV1), kGridModePort, "Grid mode", "grid_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 6, kGridModes, 0},
     {sizeof(NnagaParameterV1), kGridSeedPort, "Grid seed", "grid_seed", "", 0, 0.0f, 0, nullptr, 0},
 };
 constexpr NnagaPluginDescriptorV1 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.1.1",
-    2, 2, 11, kParameters, create, destroy, activate, deactivate, reset, setParameter,
+    sizeof(NnagaPluginDescriptorV1), "com.vibes.dsp.shuffle", "NNAGA Shuffle", "NNAGA", "1.2.0",
+    2, 2, 12, kParameters, create, destroy, activate, deactivate, reset, setParameter,
     formatParameter, nullptr, process,
 };
 const NnagaPluginDescriptorV1* getPlugin(uint32_t index) noexcept {

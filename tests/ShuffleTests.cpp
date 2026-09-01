@@ -12,16 +12,17 @@ constexpr uint32_t kRate = 48000;
 constexpr uint32_t kBarFrames = 96000;
 constexpr uint32_t kBlockFrames = 512;
 constexpr uint32_t kEnabledPort = 4;
-constexpr uint32_t kAmountPort = 5;
+constexpr uint32_t kShufflePort = 5;
 constexpr uint32_t kSeedPort = 6;
 constexpr uint32_t kMixPort = 7;
 constexpr uint32_t kBarsPort = 8;
 constexpr uint32_t kStartPort = 9;
 constexpr uint32_t kEndPort = 10;
-constexpr uint32_t kGridFromPort = 11;
-constexpr uint32_t kGridToPort = 12;
-constexpr uint32_t kGridModePort = 13;
-constexpr uint32_t kGridSeedPort = 14;
+constexpr uint32_t kGridPort = 11;
+constexpr uint32_t kFillFromPort = 12;
+constexpr uint32_t kFillToPort = 13;
+constexpr uint32_t kGridModePort = 14;
+constexpr uint32_t kGridSeedPort = 15;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -40,13 +41,14 @@ struct RunResult {
 struct Settings {
     uint32_t bars = 1;
     float enabled = 1.0f;
-    float amount = 1.0f;
+    float shuffle = 1.0f;
     float seed = 0.25f;
     float mix = 1.0f;
     float start = 0.0f;
     float end = 1.0f;
-    float grid_from = 0.2f;
-    float grid_to = 0.6f;
+    float grid = 0.2f;
+    float fill_from = 0.2f;
+    float fill_to = 0.6f;
     float grid_mode = 0.0f;
     float grid_seed = 0.0f;
     bool playing = true;
@@ -73,14 +75,15 @@ RunResult run_shuffle(const Settings& settings, uint32_t cycles = 2) {
     NnagaPluginHandle handle = descriptor->create();
     require(handle && descriptor->activate(handle, kRate, kBlockFrames), "shuffle activate");
     descriptor->set_parameter(handle, kEnabledPort, settings.enabled);
-    descriptor->set_parameter(handle, kAmountPort, settings.amount);
+    descriptor->set_parameter(handle, kShufflePort, settings.shuffle);
     descriptor->set_parameter(handle, kSeedPort, settings.seed);
     descriptor->set_parameter(handle, kMixPort, settings.mix);
     descriptor->set_parameter(handle, kBarsPort, static_cast<float>(settings.bars - 1) / 7.0f);
     descriptor->set_parameter(handle, kStartPort, settings.start);
     descriptor->set_parameter(handle, kEndPort, settings.end);
-    descriptor->set_parameter(handle, kGridFromPort, settings.grid_from);
-    descriptor->set_parameter(handle, kGridToPort, settings.grid_to);
+    descriptor->set_parameter(handle, kGridPort, settings.grid);
+    descriptor->set_parameter(handle, kFillFromPort, settings.fill_from);
+    descriptor->set_parameter(handle, kFillToPort, settings.fill_to);
     descriptor->set_parameter(handle, kGridModePort, settings.grid_mode);
     descriptor->set_parameter(handle, kGridSeedPort, settings.grid_seed);
 
@@ -143,17 +146,28 @@ void assert_format(const NnagaPluginDescriptorV1* descriptor, NnagaPluginHandle 
 int main() {
     require(nnaga_plugin_entry(0) == nullptr, "unsupported ABI is rejected");
     const auto* descriptor = shuffle_descriptor();
-    require(std::strcmp(descriptor->version, "1.1.1") == 0, "current shuffle version");
-    require(descriptor->parameter_count == 11, "current shuffle parameter count");
+    require(std::strcmp(descriptor->version, "1.2.0") == 0, "current shuffle version");
+    require(descriptor->parameter_count == 12, "current shuffle parameter count");
 
     const char* expected_names[] = {"Enabled", "Shuffle", "Seed", "Mix", "Bars",
-                                    "Shuffle start position", "Shuffle end position", "Grid from",
-                                    "Grid to", "Grid mode", "Grid seed"};
+                                    "Shuffle start position", "Shuffle end position", "Grid",
+                                    "Fill length from", "Fill length to", "Grid mode", "Grid seed"};
     for (uint32_t i = 0; i < descriptor->parameter_count; ++i) {
         require(descriptor->parameters[i].port_index == 4 + i &&
                     std::strcmp(descriptor->parameters[i].name, expected_names[i]) == 0,
                 "current shuffle port layout");
     }
+    const NnagaParameterV1& grid_parameter = descriptor->parameters[7];
+    require((grid_parameter.flags & NNAGA_PARAMETER_ENUM) != 0 &&
+                grid_parameter.scale_point_count == 6 && grid_parameter.scale_points,
+            "grid enum metadata");
+    const NnagaParameterV1& fill_from_parameter = descriptor->parameters[8];
+    const NnagaParameterV1& fill_to_parameter = descriptor->parameters[9];
+    require((fill_from_parameter.flags & NNAGA_PARAMETER_ENUM) == 0 &&
+                (fill_to_parameter.flags & NNAGA_PARAMETER_ENUM) == 0 &&
+                fill_from_parameter.scale_point_count == 0 && fill_to_parameter.scale_point_count == 0 &&
+                fill_from_parameter.step_count == 5 && fill_to_parameter.step_count == 5,
+            "fill lengths are continuous five-step faders");
 
     NnagaPluginHandle format_handle = descriptor->create();
     require(format_handle && descriptor->activate(format_handle, kRate, kBlockFrames),
@@ -162,9 +176,14 @@ int main() {
     assert_format(descriptor, format_handle, kStartPort, 0.0f, "1:1:1", "start position format");
     assert_format(descriptor, format_handle, kEndPort, 1.0f, "2:1:1", "end position format");
     const char* grid_labels[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
-    for (uint32_t i = 0; i < 6; ++i)
-        assert_format(descriptor, format_handle, kGridFromPort, i / 5.0f, grid_labels[i],
+    for (uint32_t i = 0; i < 6; ++i) {
+        assert_format(descriptor, format_handle, kGridPort, i / 5.0f, grid_labels[i],
                       "grid length format");
+        assert_format(descriptor, format_handle, kFillFromPort, i / 5.0f, grid_labels[i],
+                      "fill length from format");
+        assert_format(descriptor, format_handle, kFillToPort, i / 5.0f, grid_labels[i],
+                      "fill length to format");
+    }
     const char* mode_labels[] = {"No dotted or triplets", "Allow dotted", "Allow triplets",
                                  "Use dotted", "Use triplets", "Allow dotted and triplets"};
     for (uint32_t i = 0; i < 6; ++i)
@@ -175,8 +194,8 @@ int main() {
     Settings ranged;
     ranged.start = 0.25f;
     ranged.end = 0.75f;
-    ranged.grid_from = 0.4f;
-    ranged.grid_to = 0.4f;
+    ranged.fill_from = 0.4f;
+    ranged.fill_to = 0.4f;
     const RunResult ranged_result = run_shuffle(ranged);
     const uint32_t cycle = kBarFrames;
     for (uint32_t phase = 0; phase < cycle; ++phase)
@@ -200,18 +219,19 @@ int main() {
     assert_stereo_aligned(ranged_result, "ranged shuffle remains stereo aligned");
 
     Settings identity;
-    identity.amount = 0.0f;
-    identity.grid_from = 1.0f;
-    identity.grid_to = 1.0f;
+    identity.shuffle = 0.0f;
+    identity.grid = 1.0f;
+    identity.fill_from = 1.0f;
+    identity.fill_to = 1.0f;
     const RunResult identity_result = run_shuffle(identity);
     for (uint32_t phase = 0; phase < cycle; ++phase)
         require(identity_result.out_l[cycle + phase] == identity_result.in_l[phase] &&
                     identity_result.out_r[cycle + phase] == identity_result.in_r[phase],
-                "zero amount replays at the original temporal rate");
+                "zero shuffle replays at the original temporal rate");
 
     Settings random_grid;
-    random_grid.grid_from = 0.0f;
-    random_grid.grid_to = 1.0f;
+    random_grid.fill_from = 0.0f;
+    random_grid.fill_to = 1.0f;
     random_grid.grid_mode = 1.0f;
     random_grid.seed = 0.37f;
     random_grid.grid_seed = 0.19f;
@@ -229,12 +249,20 @@ int main() {
         }
     require(grid_changed, "different grid seed changes variable grid pattern");
 
-    random_grid.grid_seed = 0.19f;
-    random_grid.seed = 0.91f;
-    const RunResult changed_source = run_shuffle(random_grid);
+    Settings source_selection;
+    source_selection.grid = 0.2f;
+    source_selection.fill_from = 0.2f;
+    source_selection.fill_to = 0.2f;
+    source_selection.grid_mode = 0.0f;
+    source_selection.shuffle = 1.0f;
+    source_selection.grid_seed = 0.19f;
+    source_selection.seed = 0.37f;
+    const RunResult source_a = run_shuffle(source_selection);
+    source_selection.seed = 0.91f;
+    const RunResult source_b = run_shuffle(source_selection);
     bool source_changed = false;
     for (uint32_t i = cycle; i < 2 * cycle; ++i)
-        if (same_grid_a.out_l[i] != changed_source.out_l[i] || same_grid_a.out_r[i] != changed_source.out_r[i]) {
+        if (source_a.out_l[i] != source_b.out_l[i] || source_a.out_r[i] != source_b.out_r[i]) {
             source_changed = true;
             break;
         }
@@ -242,8 +270,8 @@ int main() {
 
     Settings broad_grid;
     broad_grid.bars = 8;
-    broad_grid.grid_from = 0.0f;
-    broad_grid.grid_to = 1.0f;
+    broad_grid.fill_from = 0.0f;
+    broad_grid.fill_to = 1.0f;
     broad_grid.grid_mode = 0.75f;
     broad_grid.grid_seed = 0.41f;
     const RunResult broad_result = run_shuffle(broad_grid);
