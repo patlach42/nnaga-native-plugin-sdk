@@ -110,17 +110,125 @@ uint32_t gridLengthUnits(uint32_t index) noexcept {
     return lengths[index];
 }
 
-uint32_t chooseGridUnits(Shuffle* shuffle, uint32_t low, uint32_t high) noexcept {
-    const uint32_t baseUnits = gridLengthUnits(low + nextRandom(shuffle->gridRng) % (high - low + 1));
-    const uint32_t mode = std::clamp(static_cast<uint32_t>(std::lround(clamp01(shuffle->gridMode) * 5.0f)), 0u, 5u);
-    if (mode == 0) return baseUnits;
-    if (mode == 3) return baseUnits * 3 / 2;
-    if (mode == 4) return std::max(1u, baseUnits * 2 / 3);
-    const uint32_t variant = nextRandom(shuffle->gridRng) % (mode == 5 ? 3u : 2u);
-    if (variant == 0) return baseUnits;
-    if (mode == 1) return baseUnits * 3 / 2;
-    if (mode == 2) return std::max(1u, baseUnits * 2 / 3);
-    return variant == 1 ? baseUnits * 3 / 2 : std::max(1u, baseUnits * 2 / 3);
+enum class GridVariant : uint32_t { Straight, Dotted, Triplet };
+
+GridVariant chooseGridVariant(Shuffle* shuffle) noexcept {
+    const uint32_t mode = std::clamp(
+        static_cast<uint32_t>(std::lround(clamp01(shuffle->gridMode) * 5.0f)), 0u, 5u);
+    switch (mode) {
+        case 0: return GridVariant::Straight;
+        case 3: return GridVariant::Dotted;
+        case 4: return GridVariant::Triplet;
+        case 1: return (nextRandom(shuffle->gridRng) & 1) ? GridVariant::Dotted : GridVariant::Straight;
+        case 2: return (nextRandom(shuffle->gridRng) & 1) ? GridVariant::Triplet : GridVariant::Straight;
+        default: {
+            const uint32_t choice = nextRandom(shuffle->gridRng) % 3;
+            return choice == 0 ? GridVariant::Straight
+                               : (choice == 1 ? GridVariant::Dotted : GridVariant::Triplet);
+        }
+    }
+}
+
+uint32_t makeMotif(GridVariant variant, uint32_t baseUnits, uint32_t* lengths) noexcept {
+    if (variant == GridVariant::Dotted) {
+        lengths[0] = baseUnits * 3 / 2;
+        lengths[1] = baseUnits / 2;
+        return 2;
+    }
+    if (variant == GridVariant::Triplet) {
+        lengths[0] = lengths[1] = lengths[2] = std::max(1u, baseUnits / 3);
+        return 3;
+    }
+    lengths[0] = baseUnits;
+    return 1;
+}
+
+bool appendMotif(Shuffle* shuffle, uint64_t loopFrames, uint32_t totalUnits,
+                 uint64_t destinationUnits, const uint32_t* lengths, uint32_t count,
+                 uint32_t groupUnits) noexcept {
+    if (shuffle->sliceCount + count > kMaxSlices) return false;
+    const uint64_t destinationStart = destinationUnits * loopFrames / totalUnits;
+    const uint64_t destinationEnd = (destinationUnits + groupUnits) * loopFrames / totalUnits;
+    if (destinationEnd <= destinationStart) return false;
+    const uint64_t groupLength = destinationEnd - destinationStart;
+    const bool randomize = shuffle->amount > 0.0f &&
+        (shuffle->amount >= 1.0f ||
+         nextRandom(shuffle->sourceRng) / static_cast<float>(UINT32_MAX) <= shuffle->amount);
+    const uint64_t sourceStart = randomize && groupLength < loopFrames
+        ? nextRandom(shuffle->sourceRng) % (loopFrames - groupLength + 1)
+        : destinationStart;
+    uint64_t offsetUnits = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint64_t segmentStart = (destinationUnits + offsetUnits) * loopFrames / totalUnits;
+        const uint64_t segmentEnd =
+            (destinationUnits + offsetUnits + lengths[i]) * loopFrames / totalUnits;
+        if (segmentEnd <= segmentStart) return false;
+        Slice& slice = shuffle->slices[shuffle->sliceCount++];
+        slice.destinationStart = segmentStart;
+        slice.destinationEnd = segmentEnd;
+        slice.sourceStart = sourceStart + (segmentStart - destinationStart);
+        offsetUnits += lengths[i];
+    }
+    return true;
+}
+
+void makeGrid(Shuffle* shuffle, uint64_t loopFrames, uint64_t cycleNumber) noexcept {
+    const uint32_t totalUnits = barCount(shuffle->bars) * kGridUnitsPerQuarter;
+    const uint32_t startUnits = positionStep(shuffle, shuffle->startPosition) *
+        (kGridUnitsPerQuarter / kSixteenthsPerBar);
+    const uint32_t endUnits = positionStep(shuffle, shuffle->endPosition) *
+        (kGridUnitsPerQuarter / kSixteenthsPerBar);
+    shuffle->sliceCount = 0;
+    shuffle->sliceIndex = 0;
+    if (startUnits >= endUnits) return;
+
+    shuffle->gridRng = static_cast<uint32_t>(shuffle->gridSeed * 4294967294.0f) ^
+        static_cast<uint32_t>(cycleNumber) ^ static_cast<uint32_t>(cycleNumber >> 32);
+    shuffle->sourceRng = static_cast<uint32_t>(shuffle->seed * 4294967294.0f) ^
+        static_cast<uint32_t>(cycleNumber * 0x9e3779b9u);
+    if (!shuffle->gridRng) shuffle->gridRng = 1;
+    if (!shuffle->sourceRng) shuffle->sourceRng = 1;
+
+    uint32_t low = gridIndex(shuffle->gridFrom);
+    uint32_t high = gridIndex(shuffle->gridTo);
+    if (low > high) std::swap(low, high);
+    uint64_t cursor = startUnits;
+    while (cursor < endUnits) {
+        GridVariant variant = chooseGridVariant(shuffle);
+        uint32_t lengths[3] = {};
+        uint32_t baseIndex = low + nextRandom(shuffle->gridRng) % (high - low + 1);
+        uint32_t count = makeMotif(variant, gridLengthUnits(baseIndex), lengths);
+        uint32_t groupUnits = 0;
+        for (uint32_t i = 0; i < count; ++i) groupUnits += lengths[i];
+        const uint64_t remaining = endUnits - cursor;
+        if (groupUnits > remaining) {
+            bool fitted = false;
+            for (int32_t candidate = static_cast<int32_t>(baseIndex); candidate >= 0; --candidate) {
+                uint32_t candidateLengths[3] = {};
+                const uint32_t candidateCount =
+                    makeMotif(variant, gridLengthUnits(static_cast<uint32_t>(candidate)), candidateLengths);
+                uint32_t candidateUnits = 0;
+                for (uint32_t i = 0; i < candidateCount; ++i) candidateUnits += candidateLengths[i];
+                if (candidateUnits <= remaining) {
+                    baseIndex = static_cast<uint32_t>(candidate);
+                    count = candidateCount;
+                    groupUnits = candidateUnits;
+                    std::copy(candidateLengths, candidateLengths + candidateCount, lengths);
+                    fitted = true;
+                    break;
+                }
+            }
+            if (!fitted) {
+                variant = GridVariant::Straight;
+                count = 1;
+                lengths[0] = static_cast<uint32_t>(remaining);
+                groupUnits = lengths[0];
+            }
+        }
+        if (!appendMotif(shuffle, loopFrames, totalUnits, cursor, lengths, count, groupUnits))
+            break;
+        cursor += groupUnits;
+    }
 }
 
 void resetCapture(Shuffle* shuffle) noexcept {
@@ -140,46 +248,6 @@ void resetCapture(Shuffle* shuffle) noexcept {
     if (++shuffle->generation == 0) shuffle->generation = 1;
 }
 
-void makeGrid(Shuffle* shuffle, uint64_t loopFrames, uint64_t cycleNumber) noexcept {
-    const uint32_t totalUnits = barCount(shuffle->bars) * kGridUnitsPerQuarter;
-    const uint32_t startUnits = positionStep(shuffle, shuffle->startPosition) * (kGridUnitsPerQuarter / kSixteenthsPerBar);
-    const uint32_t endUnits = positionStep(shuffle, shuffle->endPosition) * (kGridUnitsPerQuarter / kSixteenthsPerBar);
-    shuffle->sliceCount = 0;
-    shuffle->sliceIndex = 0;
-    if (startUnits >= endUnits) return;
-
-    shuffle->gridRng = static_cast<uint32_t>(shuffle->gridSeed * 4294967294.0f) ^
-        static_cast<uint32_t>(cycleNumber) ^ static_cast<uint32_t>(cycleNumber >> 32);
-    shuffle->sourceRng = static_cast<uint32_t>(shuffle->seed * 4294967294.0f) ^
-        static_cast<uint32_t>(cycleNumber * 0x9e3779b9u);
-    if (!shuffle->gridRng) shuffle->gridRng = 1;
-    if (!shuffle->sourceRng) shuffle->sourceRng = 1;
-
-    uint32_t low = gridIndex(shuffle->gridFrom);
-    uint32_t high = gridIndex(shuffle->gridTo);
-    if (low > high) std::swap(low, high);
-    uint64_t cursor = startUnits;
-    const uint64_t minimumUnits = gridLengthUnits(0);
-    while (cursor < endUnits && shuffle->sliceCount < kMaxSlices) {
-        const uint32_t selectedUnits = chooseGridUnits(shuffle, low, high);
-        const uint64_t remaining = endUnits - cursor;
-        const uint64_t destinationUnits = std::min<uint64_t>(remaining, std::max<uint64_t>(minimumUnits, selectedUnits));
-        const uint64_t destinationStart = cursor * loopFrames / totalUnits;
-        const uint64_t destinationEnd = std::min<uint64_t>(loopFrames, (cursor + destinationUnits) * loopFrames / totalUnits);
-        if (destinationEnd <= destinationStart) break;
-
-        Slice& slice = shuffle->slices[shuffle->sliceCount++];
-        slice.destinationStart = destinationStart;
-        slice.destinationEnd = destinationEnd;
-        const uint64_t length = destinationEnd - destinationStart;
-        const bool randomize = shuffle->amount > 0.0f &&
-            (shuffle->amount >= 1.0f || (nextRandom(shuffle->sourceRng) / static_cast<float>(UINT32_MAX)) <= shuffle->amount);
-        slice.sourceStart = randomize && length < loopFrames
-            ? nextRandom(shuffle->sourceRng) % (loopFrames - length + 1)
-            : destinationStart;
-        cursor += destinationUnits;
-    }
-}
 
 bool rangeActive(const Shuffle* shuffle, uint64_t phase, uint64_t loopFrames) noexcept {
     if (!loopFrames) return false;
