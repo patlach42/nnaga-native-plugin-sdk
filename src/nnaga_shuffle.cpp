@@ -505,7 +505,7 @@ constexpr NnagaParameterV2 kParameters[] = {
     {sizeof(NnagaParameterV2), kTripletModePort, "Triplet mode", "triplet_mode", "", NNAGA_PARAMETER_ENUM, 0.0f, 2, kTripletModes, 0},
 };
 constexpr NnagaPluginDescriptorV2 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV2), "com.vibes.dsp.shuffle", "shuffle", "NNAGA Shuffle", "NNAGA", "1.2.2",
+    sizeof(NnagaPluginDescriptorV2), "com.vibes.dsp.shuffle", "shuffle", "NNAGA Shuffle", "NNAGA", "1.2.3",
     2, 2, 13, NNAGA_NATIVE_MAX_FRAMES, NNAGA_REALTIME_CERTIFIED_IN_PROCESS, kParameters, create, destroy, activate,
     deactivate, reset, setParameter, formatParameter, nullptr, process,
 };

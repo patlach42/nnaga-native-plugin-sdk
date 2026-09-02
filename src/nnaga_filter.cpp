@@ -231,7 +231,7 @@ const NnagaParameterV2 kParameters[] = {
      log_to_normalized(0.70710678f, kMinQ, kMaxQ), 0, nullptr, 0},
 };
 const NnagaPluginDescriptorV2 kDescriptor = {
-    sizeof(NnagaPluginDescriptorV2), "com.vibes.dsp.filter", "filter", "NNAGA Filter", "NNAGA", "1.0.0",
+    sizeof(NnagaPluginDescriptorV2), "com.vibes.dsp.filter", "filter", "NNAGA Filter", "NNAGA", "1.0.1",
     2, 2, 3, NNAGA_NATIVE_MAX_FRAMES, NNAGA_REALTIME_CERTIFIED_IN_PROCESS, kParameters, create, destroy, activate,
     deactivate, reset, set_parameter, format_parameter, latency_frames, process,
 };

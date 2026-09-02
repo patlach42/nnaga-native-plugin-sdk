@@ -7,7 +7,7 @@ expected = {
     "repository_id": "native.nnaga-filter",
     "descriptor_id": "com.vibes.dsp.filter",
     "name": "NNAGA Filter",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "license": "MIT",
     "library": "libnnaga_plugin_filter.so",
 }

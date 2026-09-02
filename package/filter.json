@@ -2,7 +2,7 @@
   "repository_id": "native.nnaga-filter",
   "descriptor_id": "com.vibes.dsp.filter",
   "name": "NNAGA Filter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "source": "https://github.com/patlach42/nnaga-native-plugin-sdk",
   "manufacturer": "NNAGA",
   "category": "Filter",
